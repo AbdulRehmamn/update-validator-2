@@ -1,0 +1,888 @@
+"""NumVerify Pro hybrid phone-number intelligence server.
+
+The application always performs local structural validation first. When a
+Telnyx or Twilio credential is configured it then uses current carrier data,
+including portability data when Telnyx supplies it. If a live lookup cannot be
+completed, the response falls back to clearly labelled offline metadata.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import sqlite3
+import threading
+import time
+import webbrowser
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import quote
+
+import httpx
+import phonenumbers
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, Query
+from fastapi.responses import FileResponse
+from phonenumbers import PhoneNumberType, carrier, geocoder
+from pydantic import BaseModel, Field
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATABASE_PATH = BASE_DIR / "nanpa_prefixes.sqlite3"
+CACHE_DATABASE_PATH = BASE_DIR / "lookup_cache.sqlite3"
+DEFAULT_REGION = "US"
+
+load_dotenv(BASE_DIR / ".env")
+
+
+def _bounded_env_number(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+LOOKUP_PROVIDER = os.getenv("LOOKUP_PROVIDER", "auto").strip().lower()
+if LOOKUP_PROVIDER not in {"auto", "telnyx", "twilio", "offline"}:
+    LOOKUP_PROVIDER = "auto"
+
+TELNYX_API_KEY = os.getenv("TELNYX_API_KEY", "").strip()
+TWILIO_USERNAME = (
+    os.getenv("TWILIO_API_KEY", "").strip()
+    or os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+)
+TWILIO_PASSWORD = (
+    os.getenv("TWILIO_API_SECRET", "").strip()
+    or os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+)
+LOOKUP_CACHE_HOURS = _bounded_env_number("LOOKUP_CACHE_HOURS", 24, 0, 720)
+LOOKUP_CONCURRENCY = int(_bounded_env_number("LOOKUP_CONCURRENCY", 8, 1, 30))
+LOOKUP_TIMEOUT_SECONDS = _bounded_env_number(
+    "LOOKUP_TIMEOUT_SECONDS", 20, 5, 60
+)
+
+PROVIDER_LABELS = {
+    "telnyx": "Telnyx Number Lookup",
+    "twilio": "Twilio Line Type Intelligence",
+}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _initialize_cache()
+    yield
+
+
+app = FastAPI(
+    title="NumVerify Pro Live Intelligence",
+    description=(
+        "Local structural validation with optional live carrier, line-type, "
+        "and portability intelligence from Telnyx or Twilio."
+    ),
+    version="6.2.0",
+    lifespan=lifespan,
+)
+
+
+class BulkValidationRequest(BaseModel):
+    numbers: list[str] = Field(default_factory=list)
+    default_region: str = Field(default=DEFAULT_REGION, min_length=2, max_length=2)
+    lookup_mode: Literal["auto", "live", "offline"] = "auto"
+    refresh_live: bool = False
+
+
+class LiveLookupError(RuntimeError):
+    """A safe, user-displayable live-provider error."""
+
+
+def utc_iso(timestamp: float | None = None) -> str:
+    return datetime.fromtimestamp(
+        timestamp if timestamp is not None else time.time(), timezone.utc
+    ).isoformat(timespec="seconds")
+
+
+def configured_providers() -> list[str]:
+    available: list[str] = []
+    if TELNYX_API_KEY:
+        available.append("telnyx")
+    if TWILIO_USERNAME and TWILIO_PASSWORD:
+        available.append("twilio")
+    return available
+
+
+def provider_chain(lookup_mode: str = "auto") -> list[str]:
+    if lookup_mode == "offline" or LOOKUP_PROVIDER == "offline":
+        return []
+    available = configured_providers()
+    if LOOKUP_PROVIDER in {"telnyx", "twilio"}:
+        return [LOOKUP_PROVIDER] if LOOKUP_PROVIDER in available else []
+    # Telnyx is preferred for NANP records because its response can include
+    # porting date, LRN, OCN, SPID, city, and state. Twilio is the fallback.
+    return [provider for provider in ("telnyx", "twilio") if provider in available]
+
+
+def provider_display_name(provider: str) -> str:
+    return PROVIDER_LABELS.get(provider, provider.title())
+
+
+def map_libphonenumber_type(number: phonenumbers.PhoneNumber) -> tuple[str, str]:
+    number_type = phonenumbers.number_type(number)
+    mapping = {
+        PhoneNumberType.MOBILE: ("Cell Phone", "Mobile"),
+        PhoneNumberType.FIXED_LINE: ("Landline", "Fixed Line"),
+        PhoneNumberType.FIXED_LINE_OR_MOBILE: (
+            "Fixed or Mobile",
+            "Ambiguous Fixed/Mobile",
+        ),
+        PhoneNumberType.VOIP: ("VoIP", "VoIP"),
+        PhoneNumberType.TOLL_FREE: ("Toll-Free", "Toll-Free"),
+        PhoneNumberType.PREMIUM_RATE: ("Premium Rate", "Premium Rate"),
+        PhoneNumberType.SHARED_COST: ("Shared Cost", "Shared Cost"),
+        PhoneNumberType.PERSONAL_NUMBER: ("Personal Number", "Personal Number"),
+        PhoneNumberType.PAGER: ("Pager", "Pager"),
+        PhoneNumberType.UAN: ("Universal Access", "Universal Access Number"),
+        PhoneNumberType.VOICEMAIL: ("Voicemail", "Voicemail"),
+    }
+    return mapping.get(number_type, ("Unknown", "Unknown"))
+
+
+def normalize_provider_type(raw_type: Any) -> tuple[str, str]:
+    raw = str(raw_type or "").strip()
+    key = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    mapping = {
+        "mobile": ("Cell Phone", "Mobile"),
+        "cell": ("Cell Phone", "Mobile"),
+        "cellular": ("Cell Phone", "Mobile"),
+        "wireless": ("Cell Phone", "Mobile"),
+        "landline": ("Landline", "Fixed Line"),
+        "fixed": ("Landline", "Fixed Line"),
+        "fixedline": ("Landline", "Fixed Line"),
+        "wireline": ("Landline", "Fixed Line"),
+        "voip": ("VoIP", "VoIP"),
+        "fixedvoip": ("VoIP", "Fixed VoIP"),
+        "nonfixedvoip": ("VoIP", "Non-Fixed VoIP"),
+        "tollfree": ("Toll-Free", "Toll-Free"),
+        "premium": ("Premium Rate", "Premium Rate"),
+        "premiumrate": ("Premium Rate", "Premium Rate"),
+        "sharedcost": ("Shared Cost", "Shared Cost"),
+        "uan": ("Universal Access", "Universal Access Number"),
+        "universalaccess": ("Universal Access", "Universal Access Number"),
+        "voicemail": ("Voicemail", "Voicemail"),
+        "pager": ("Pager", "Pager"),
+        "personal": ("Personal Number", "Personal Number"),
+        "personalnumber": ("Personal Number", "Personal Number"),
+        "satellite": ("Satellite", "Satellite"),
+        "unknown": ("Unknown", "Unknown"),
+    }
+    return mapping.get(key, ("Unknown", raw or "Unknown"))
+
+
+def lookup_nanpa_prefix(national_digits: str) -> dict[str, Any] | None:
+    """Look up the original NPA-NXX assignment in the local database."""
+    if not DATABASE_PATH.exists() or len(national_digits) != 10:
+        return None
+    prefix = f"{national_digits[:3]}-{national_digits[3:6]}"
+    try:
+        with sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT prefix, state, ocn, company, rate_center, pooled,
+                       estimated_type, confidence
+                FROM prefixes WHERE prefix = ?
+                """,
+                (prefix,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return dict(row) if row else None
+
+
+def invalid_result(raw: str, message: str) -> dict[str, Any]:
+    return {
+        "raw": raw,
+        "number": raw,
+        "e164": "",
+        "national_format": raw,
+        "country_code": "",
+        "country": "",
+        "valid": False,
+        "possible": False,
+        "lineType": "Unknown",
+        "lineSubtype": "Unknown",
+        "carrier": "Invalid format",
+        "normalizedCarrier": "",
+        "originalCarrier": "",
+        "location": "N/A",
+        "city": "",
+        "state": "",
+        "ported": None,
+        "portedStatus": "Unknown",
+        "portedDate": "",
+        "lrn": "",
+        "ocn": "",
+        "spid": "",
+        "altSpid": "",
+        "mobileCountryCode": "",
+        "mobileNetworkCode": "",
+        "prefix": "",
+        "rateCenter": "",
+        "pooledPrefix": None,
+        "lookupProvider": "offline",
+        "lookupSource": "Offline structural validation",
+        "liveLookup": False,
+        "cacheHit": False,
+        "lookupTimestamp": "",
+        "dataFreshness": "Offline metadata",
+        "classificationConfidence": "None",
+        "estimated": False,
+        "fallbackUsed": False,
+        "classificationNote": message,
+        "lookupError": "",
+        "error": message,
+    }
+
+
+def validate_number_offline(
+    phone: str,
+    default_region: str = DEFAULT_REGION,
+) -> dict[str, Any]:
+    raw = str(phone or "").strip()
+    region = (default_region or DEFAULT_REGION).strip().upper()
+    try:
+        parsed = phonenumbers.parse(raw, None if raw.startswith("+") else region)
+    except phonenumbers.NumberParseException as exc:
+        return invalid_result(raw, str(exc))
+
+    possible = phonenumbers.is_possible_number(parsed)
+    valid = phonenumbers.is_valid_number(parsed)
+    e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    national = phonenumbers.format_number(
+        parsed, phonenumbers.PhoneNumberFormat.NATIONAL
+    )
+    country = phonenumbers.region_code_for_number(parsed) or ""
+    location = geocoder.description_for_number(parsed, "en") or country or "Unknown"
+    offline_carrier = carrier.name_for_number(parsed, "en") or "Not available offline"
+    national_digits = str(parsed.national_number)
+
+    line_type, line_subtype = map_libphonenumber_type(parsed)
+    special_types = {
+        "Toll-Free",
+        "Premium Rate",
+        "Shared Cost",
+        "Personal Number",
+        "Pager",
+        "Universal Access",
+        "Voicemail",
+    }
+    confidence = (
+        "High"
+        if line_type in special_types
+        else "Low"
+        if line_type in {"Fixed or Mobile", "Unknown"}
+        else "Medium"
+    )
+    source = "libphonenumber numbering metadata"
+    estimated = line_type in {"Fixed or Mobile", "Unknown"}
+    note = (
+        "Offline numbering-plan classification. It validates structure but "
+        "does not prove that the number is active or reveal a recent port."
+    )
+
+    prefix_record: dict[str, Any] | None = None
+    if valid and parsed.country_code == 1:
+        prefix_record = lookup_nanpa_prefix(national_digits)
+
+    # Ordinary NANP numbers are intentionally marked ambiguous by
+    # libphonenumber. The bundled prefix record can estimate the original
+    # assignment, but it is never presented as current live carrier data.
+    if valid and line_type == "Fixed or Mobile" and prefix_record:
+        offline_carrier = prefix_record["company"] or offline_carrier
+        estimated_type = prefix_record["estimated_type"]
+        confidence = prefix_record["confidence"]
+        if estimated_type != "Fixed or Mobile":
+            line_type = estimated_type
+            line_subtype = f"Original-prefix estimate: {estimated_type}"
+        source = "NANPA original-prefix estimate"
+        estimated = True
+        pooled_note = (
+            " This prefix is pooled, so its thousands block may use another carrier."
+            if prefix_record["pooled"]
+            else ""
+        )
+        note = (
+            f"Estimated from original prefix {prefix_record['prefix']} assigned to "
+            f"{prefix_record['company']}.{pooled_note} Ported numbers may differ."
+        )
+
+    return {
+        "raw": raw,
+        "number": national_digits,
+        "e164": e164,
+        "national_format": national,
+        "country_code": f"+{parsed.country_code}",
+        "country": country,
+        "valid": valid,
+        "possible": possible,
+        "lineType": line_type,
+        "lineSubtype": line_subtype,
+        "carrier": offline_carrier,
+        "normalizedCarrier": "",
+        "originalCarrier": offline_carrier if prefix_record else "",
+        "location": location,
+        "city": prefix_record["rate_center"] if prefix_record else "",
+        "state": prefix_record["state"] if prefix_record else "",
+        "ported": None,
+        "portedStatus": "Unknown — live lookup required",
+        "portedDate": "",
+        "lrn": "",
+        "ocn": prefix_record["ocn"] if prefix_record else "",
+        "spid": "",
+        "altSpid": "",
+        "mobileCountryCode": "",
+        "mobileNetworkCode": "",
+        "prefix": prefix_record["prefix"] if prefix_record else "",
+        "rateCenter": prefix_record["rate_center"] if prefix_record else "",
+        "pooledPrefix": bool(prefix_record["pooled"]) if prefix_record else None,
+        "lookupProvider": "offline",
+        "lookupSource": source,
+        "liveLookup": False,
+        "cacheHit": False,
+        "lookupTimestamp": "",
+        "dataFreshness": "Offline metadata",
+        "classificationConfidence": confidence,
+        "estimated": estimated,
+        "fallbackUsed": False,
+        "classificationNote": note,
+        "lookupError": "",
+        "error": None,
+    }
+
+
+_CACHE_LOCK = threading.Lock()
+
+
+def _initialize_cache() -> None:
+    try:
+        with _CACHE_LOCK, sqlite3.connect(CACHE_DATABASE_PATH) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS live_lookup_cache (
+                    e164 TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    looked_up_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    PRIMARY KEY (e164, provider)
+                )
+                """
+            )
+            connection.execute(
+                "DELETE FROM live_lookup_cache WHERE expires_at <= ?", (time.time(),)
+            )
+    except sqlite3.Error:
+        # Caching is an optimization; lookup must still work if the directory is
+        # read-only or the cache database is unavailable.
+        pass
+
+
+def cache_get(e164: str, provider: str) -> tuple[dict[str, Any], float] | None:
+    if LOOKUP_CACHE_HOURS <= 0:
+        return None
+    try:
+        with _CACHE_LOCK, sqlite3.connect(CACHE_DATABASE_PATH) as connection:
+            row = connection.execute(
+                """
+                SELECT payload, looked_up_at
+                FROM live_lookup_cache
+                WHERE e164 = ? AND provider = ? AND expires_at > ?
+                """,
+                (e164, provider, time.time()),
+            ).fetchone()
+        if not row:
+            return None
+        return json.loads(row[0]), float(row[1])
+    except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def cache_put(e164: str, provider: str, payload: dict[str, Any]) -> float:
+    looked_up_at = time.time()
+    expires_at = looked_up_at + (LOOKUP_CACHE_HOURS * 3600)
+    try:
+        with _CACHE_LOCK, sqlite3.connect(CACHE_DATABASE_PATH) as connection:
+            connection.execute(
+                """
+                INSERT INTO live_lookup_cache
+                    (e164, provider, payload, looked_up_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(e164, provider) DO UPDATE SET
+                    payload = excluded.payload,
+                    looked_up_at = excluded.looked_up_at,
+                    expires_at = excluded.expires_at
+                """,
+                (e164, provider, json.dumps(payload), looked_up_at, expires_at),
+            )
+    except sqlite3.Error:
+        pass
+    return looked_up_at
+
+
+def _provider_error(response: httpx.Response, provider: str) -> LiveLookupError:
+    detail = ""
+    try:
+        body = response.json()
+        errors = body.get("errors") if isinstance(body, dict) else None
+        if isinstance(errors, list) and errors:
+            first = errors[0] if isinstance(errors[0], dict) else {}
+            detail = str(first.get("detail") or first.get("title") or "")
+        elif isinstance(body, dict):
+            detail = str(body.get("message") or body.get("detail") or "")
+    except (ValueError, TypeError):
+        detail = ""
+    safe_detail = f": {detail[:180]}" if detail else ""
+    return LiveLookupError(
+        f"{provider_display_name(provider)} returned HTTP {response.status_code}{safe_detail}"
+    )
+
+
+def parse_telnyx_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data") or {}
+    carrier_data = data.get("carrier") or {}
+    portability = data.get("portability") or {}
+    raw_type = portability.get("line_type") or carrier_data.get("type")
+    line_type, line_subtype = normalize_provider_type(raw_type)
+
+    ported_raw = str(portability.get("ported_status") or "").strip().upper()
+    if ported_raw in {"Y", "YES", "TRUE"}:
+        ported: bool | None = True
+        ported_status = "Ported"
+    elif ported_raw in {"N", "NO", "FALSE"}:
+        ported = False
+        ported_status = "Not ported"
+    else:
+        ported = None
+        ported_status = "Unknown"
+
+    current_carrier = (
+        portability.get("spid_carrier_name")
+        or portability.get("altspid_carrier_name")
+        or carrier_data.get("name")
+        or carrier_data.get("normalized_carrier")
+        or "Not returned"
+    )
+    city = str(portability.get("city") or "")
+    state = str(portability.get("state") or "")
+    live_location = ", ".join(value for value in (city, state) if value)
+    provider_error_code = carrier_data.get("error_code")
+
+    return {
+        "providerValid": True,
+        "lineType": line_type,
+        "lineSubtype": line_subtype,
+        "carrier": str(current_carrier),
+        "normalizedCarrier": str(carrier_data.get("normalized_carrier") or ""),
+        "originalCarrier": str(carrier_data.get("name") or ""),
+        "location": live_location,
+        "city": city,
+        "state": state,
+        "ported": ported,
+        "portedStatus": ported_status,
+        "portedDate": str(portability.get("ported_date") or ""),
+        "lrn": str(portability.get("lrn") or ""),
+        "ocn": str(portability.get("ocn") or ""),
+        "spid": str(portability.get("spid") or ""),
+        "altSpid": str(portability.get("altspid") or ""),
+        "mobileCountryCode": str(carrier_data.get("mobile_country_code") or ""),
+        "mobileNetworkCode": str(carrier_data.get("mobile_network_code") or ""),
+        "providerErrorCode": str(provider_error_code or ""),
+        "lookupSource": "Telnyx live carrier and portability data",
+        "classificationNote": (
+            "Live carrier lookup completed. Portability fields are shown exactly "
+            "as returned by Telnyx."
+        ),
+    }
+
+
+def parse_twilio_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    intelligence = payload.get("line_type_intelligence") or {}
+    raw_type = intelligence.get("type")
+    line_type, line_subtype = normalize_provider_type(raw_type)
+    provider_valid = payload.get("valid")
+    if not isinstance(provider_valid, bool):
+        provider_valid = True
+    validation_errors = payload.get("validation_errors") or []
+    error_code = intelligence.get("error_code")
+
+    return {
+        "providerValid": provider_valid,
+        "lineType": line_type,
+        "lineSubtype": line_subtype,
+        "carrier": str(intelligence.get("carrier_name") or "Not returned"),
+        "normalizedCarrier": "",
+        "originalCarrier": "",
+        "location": "",
+        "city": "",
+        "state": "",
+        "ported": None,
+        "portedStatus": "Not supplied by Twilio Line Type Intelligence",
+        "portedDate": "",
+        "lrn": "",
+        "ocn": "",
+        "spid": "",
+        "altSpid": "",
+        "mobileCountryCode": str(intelligence.get("mobile_country_code") or ""),
+        "mobileNetworkCode": str(intelligence.get("mobile_network_code") or ""),
+        "providerErrorCode": str(error_code or ""),
+        "validationErrors": validation_errors,
+        "lookupSource": "Twilio live Line Type Intelligence",
+        "classificationNote": (
+            "Live line-type and carrier lookup completed with Twilio. "
+            "This package does not return portability details."
+        ),
+    }
+
+
+async def lookup_telnyx(
+    e164: str,
+    client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    url = f"https://api.telnyx.com/v2/number_lookup/{quote(e164, safe='')}"
+    try:
+        response = await client.get(
+            url,
+            params={"type": "carrier"},
+            headers={"Authorization": f"Bearer {TELNYX_API_KEY}"},
+        )
+    except httpx.HTTPError as exc:
+        raise LiveLookupError(f"Telnyx network error: {exc.__class__.__name__}") from exc
+    if response.status_code >= 400:
+        raise _provider_error(response, "telnyx")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise LiveLookupError("Telnyx returned an unreadable response") from exc
+    return parse_telnyx_payload(payload)
+
+
+async def lookup_twilio(
+    e164: str,
+    client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    url = f"https://lookups.twilio.com/v2/PhoneNumbers/{quote(e164, safe='')}"
+    try:
+        response = await client.get(
+            url,
+            params={"Fields": "line_type_intelligence"},
+            auth=httpx.BasicAuth(TWILIO_USERNAME, TWILIO_PASSWORD),
+        )
+    except httpx.HTTPError as exc:
+        raise LiveLookupError(f"Twilio network error: {exc.__class__.__name__}") from exc
+    if response.status_code >= 400:
+        raise _provider_error(response, "twilio")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise LiveLookupError("Twilio returned an unreadable response") from exc
+    return parse_twilio_payload(payload)
+
+
+async def query_provider(
+    provider: str,
+    e164: str,
+    client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    if provider == "telnyx":
+        return await lookup_telnyx(e164, client)
+    if provider == "twilio":
+        return await lookup_twilio(e164, client)
+    raise LiveLookupError(f"Unsupported lookup provider: {provider}")
+
+
+def merge_live_result(
+    offline: dict[str, Any],
+    live: dict[str, Any],
+    provider: str,
+    *,
+    cache_hit: bool,
+    looked_up_at: float,
+) -> dict[str, Any]:
+    result = offline.copy()
+    live_line_type = live.get("lineType") or "Unknown"
+    live_type_known = live_line_type != "Unknown"
+
+    fields = (
+        "carrier",
+        "normalizedCarrier",
+        "originalCarrier",
+        "city",
+        "state",
+        "ported",
+        "portedStatus",
+        "portedDate",
+        "lrn",
+        "ocn",
+        "spid",
+        "altSpid",
+        "mobileCountryCode",
+        "mobileNetworkCode",
+        "providerErrorCode",
+        "validationErrors",
+    )
+    for field in fields:
+        if field in live and live[field] not in (None, "", []):
+            result[field] = live[field]
+
+    if live.get("location"):
+        result["location"] = live["location"]
+
+    if isinstance(live.get("providerValid"), bool):
+        result["valid"] = live["providerValid"]
+
+    if live_type_known:
+        result["lineType"] = live_line_type
+        result["lineSubtype"] = live.get("lineSubtype") or live_line_type
+        result["estimated"] = False
+        result["fallbackUsed"] = False
+        result["classificationConfidence"] = "Live provider data"
+        result["classificationNote"] = live.get("classificationNote") or ""
+    else:
+        result["estimated"] = True
+        result["fallbackUsed"] = True
+        result["classificationConfidence"] = offline.get(
+            "classificationConfidence", "Low"
+        )
+        result["classificationNote"] = (
+            f"{provider_display_name(provider)} returned an unknown line type. "
+            f"Showing the offline result instead. {offline.get('classificationNote', '')}"
+        ).strip()
+
+    result["lookupProvider"] = provider
+    result["lookupSource"] = (
+        live.get("lookupSource")
+        if live_type_known
+        else f"Offline fallback after {provider_display_name(provider)}"
+    )
+    result["liveLookup"] = True
+    result["cacheHit"] = cache_hit
+    result["lookupTimestamp"] = utc_iso(looked_up_at)
+    result["dataFreshness"] = (
+        f"Cached live result ({result['lookupTimestamp']})"
+        if cache_hit
+        else f"Live lookup ({result['lookupTimestamp']})"
+    )
+    result["lookupError"] = (
+        f"Provider type unavailable (code {live.get('providerErrorCode')})"
+        if not live_type_known and live.get("providerErrorCode")
+        else ""
+    )
+    return result
+
+
+async def validate_number(
+    phone: str,
+    default_region: str = DEFAULT_REGION,
+    lookup_mode: Literal["auto", "live", "offline"] = "auto",
+    refresh_live: bool = False,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    offline = validate_number_offline(phone, default_region)
+    if not offline["valid"] or lookup_mode == "offline":
+        return offline
+
+    providers = provider_chain(lookup_mode)
+    if not providers:
+        if lookup_mode == "live":
+            offline["fallbackUsed"] = True
+            offline["lookupError"] = (
+                "Live lookup requested but no configured provider is available."
+            )
+            offline["classificationNote"] = (
+                "Live lookup is not configured. " + offline["classificationNote"]
+            )
+        return offline
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=LOOKUP_TIMEOUT_SECONDS)
+
+    errors: list[str] = []
+    unknown_result: tuple[dict[str, Any], str, bool, float] | None = None
+    try:
+        for provider in providers:
+            cached = None if refresh_live else cache_get(offline["e164"], provider)
+            if cached:
+                live, looked_up_at = cached
+                cache_hit = True
+            else:
+                try:
+                    live = await query_provider(provider, offline["e164"], client)
+                except LiveLookupError as exc:
+                    errors.append(str(exc))
+                    continue
+                looked_up_at = cache_put(offline["e164"], provider, live)
+                cache_hit = False
+
+            merged = merge_live_result(
+                offline,
+                live,
+                provider,
+                cache_hit=cache_hit,
+                looked_up_at=looked_up_at,
+            )
+            if live.get("lineType") != "Unknown" or live.get("providerValid") is False:
+                if errors:
+                    merged["lookupError"] = "; ".join(errors)
+                return merged
+            unknown_result = (live, provider, cache_hit, looked_up_at)
+
+        if unknown_result:
+            live, provider, cache_hit, looked_up_at = unknown_result
+            merged = merge_live_result(
+                offline,
+                live,
+                provider,
+                cache_hit=cache_hit,
+                looked_up_at=looked_up_at,
+            )
+            combined = [message for message in errors if message]
+            if merged.get("lookupError"):
+                combined.append(merged["lookupError"])
+            merged["lookupError"] = "; ".join(combined)
+            return merged
+
+        offline["fallbackUsed"] = True
+        offline["lookupError"] = "; ".join(errors) or "Live lookup was unavailable."
+        offline["lookupSource"] = "Offline fallback — live lookup failed"
+        offline["classificationNote"] = (
+            "All configured live lookups failed. " + offline["classificationNote"]
+        )
+        return offline
+    finally:
+        if owns_client and client is not None:
+            await client.aclose()
+
+
+def database_metadata() -> dict[str, str]:
+    if not DATABASE_PATH.exists():
+        return {}
+    try:
+        with sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True) as connection:
+            return dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+    except sqlite3.Error:
+        return {}
+
+
+@app.get("/", include_in_schema=False)
+def portal() -> FileResponse:
+    return FileResponse(BASE_DIR / "index.html")
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "engine": "live-hybrid" if provider_chain() else "offline-fallback",
+        "live_enabled": bool(provider_chain()),
+        "database_ready": DATABASE_PATH.exists(),
+    }
+
+
+@app.get("/engine")
+def engine_status() -> dict[str, Any]:
+    metadata = database_metadata()
+    providers = provider_chain()
+    available = configured_providers()
+    return {
+        "live_enabled": bool(providers),
+        "active_provider": provider_display_name(providers[0]) if providers else "",
+        "fallback_providers": [provider_display_name(value) for value in providers[1:]],
+        "configured_providers": [provider_display_name(value) for value in available],
+        "provider_preference": LOOKUP_PROVIDER,
+        "database_ready": DATABASE_PATH.exists(),
+        "mode": "Live carrier intelligence with offline fallback"
+        if providers
+        else "Offline numbering metadata only",
+        "file_updated": metadata.get("file_updated", "Unknown"),
+        "method": metadata.get("method", "Carrier-name prefix estimate"),
+        "rules_version": metadata.get("rules_version", "Legacy carrier rules"),
+        "cache_hours": LOOKUP_CACHE_HOURS,
+        "concurrency": LOOKUP_CONCURRENCY,
+        "accuracy_notice": (
+            "No database can guarantee 100% accuracy or prove reachability. "
+            "Live results are the provider's latest available carrier records."
+        ),
+    }
+
+
+@app.get("/validate")
+async def validate_phone(
+    phone: str = Query(..., description="Phone number, preferably in E.164 format"),
+    default_region: str = Query(DEFAULT_REGION, min_length=2, max_length=2),
+    lookup_mode: Literal["auto", "live", "offline"] = Query("auto"),
+    refresh_live: bool = Query(False),
+) -> dict[str, Any]:
+    return await validate_number(
+        phone,
+        default_region,
+        lookup_mode=lookup_mode,
+        refresh_live=refresh_live,
+    )
+
+
+@app.post("/validate/bulk")
+async def validate_bulk(payload: BulkValidationRequest) -> dict[str, Any]:
+    unique_numbers = list(dict.fromkeys(str(number) for number in payload.numbers))
+    semaphore = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+    should_open_client = bool(provider_chain(payload.lookup_mode))
+
+    async def run_one(number: str, client: httpx.AsyncClient | None) -> dict[str, Any]:
+        async with semaphore:
+            return await validate_number(
+                number,
+                payload.default_region,
+                lookup_mode=payload.lookup_mode,
+                refresh_live=payload.refresh_live,
+                client=client,
+            )
+
+    if should_open_client:
+        async with httpx.AsyncClient(timeout=LOOKUP_TIMEOUT_SECONDS) as client:
+            unique_values = await asyncio.gather(
+                *(run_one(number, client) for number in unique_numbers)
+            )
+    else:
+        unique_values = await asyncio.gather(
+            *(run_one(number, None) for number in unique_numbers)
+        )
+
+    unique_results = dict(zip(unique_numbers, unique_values))
+    results = [unique_results[str(number)].copy() for number in payload.numbers]
+    return {
+        "count": len(results),
+        "unique_count": len(unique_numbers),
+        "live_enabled": bool(provider_chain(payload.lookup_mode)),
+        "database_ready": DATABASE_PATH.exists(),
+        "results": results,
+    }
+
+
+def open_portal() -> None:
+    webbrowser.open("http://127.0.0.1:8000", new=2)
+
+
+if __name__ == "__main__":
+    if os.environ.get("NO_BROWSER") != "1":
+        threading.Timer(1.25, open_portal).start()
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

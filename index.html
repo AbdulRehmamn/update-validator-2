@@ -1,0 +1,1390 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-900 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NumVerify Pro v6.2 — Nationwide Phone Intelligence</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <!-- SheetJS CDN (Excel Processing) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- PDF.js CDN (PDF Text Extraction) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <script>
+    // Initialize PDF.js worker URL
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#f0f7ff',
+              100: '#e0effe',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    /* Custom scrollbar for modern sleek aesthetic */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="h-full flex flex-col font-sans antialiased bg-slate-950 text-slate-100 selection:bg-brand-500 selection:text-white">
+
+  <!-- Top Navigation Bar -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <div class="flex items-center space-x-3">
+          <div class="p-2 bg-brand-600/20 text-brand-500 rounded-xl border border-brand-500/30">
+            <i data-lucide="phone-call" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <div class="flex items-center space-x-2">
+              <span class="font-bold text-lg tracking-tight text-white">NumVerify Pro</span>
+              <span class="px-2 py-0.5 text-xs font-semibold bg-brand-500/10 text-brand-400 border border-brand-500/20 rounded-full">v6.2 Nationwide</span>
+              <span id="lookup-mode-badge" class="hidden sm:inline px-2 py-0.5 text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full">Checking engine...</span>
+            </div>
+            <p class="text-xs text-slate-400 hidden sm:block">Nationwide carrier estimates with transparent live/offline sourcing</p>
+          </div>
+        </div>
+        
+        <!-- Navigation Tabs -->
+        <nav class="flex items-center space-x-1 sm:space-x-2">
+          <button id="tab-btn-dashboard" onclick="switchTab('dashboard')" class="px-3 py-2 text-sm font-medium rounded-lg transition-colors flex items-center space-x-1.5 bg-slate-800 text-white">
+            <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">Batch & File Processor</span>
+          </button>
+          <button id="tab-btn-single" onclick="switchTab('single')" class="px-3 py-2 text-sm font-medium rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors flex items-center space-x-1.5">
+            <i data-lucide="search" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">Single Lookup</span>
+          </button>
+          <button id="tab-btn-docs" onclick="switchTab('docs')" class="px-3 py-2 text-sm font-medium rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors flex items-center space-x-1.5">
+            <i data-lucide="code-2" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">API & Integrations</span>
+          </button>
+          <button onclick="toggleSettingsModal()" class="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors" title="Local engine settings">
+            <i data-lucide="settings" class="w-5 h-5"></i>
+          </button>
+        </nav>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col space-y-6">
+
+    <!-- TAB 1: BULK & FILE PROCESSOR -->
+    <section id="view-dashboard" class="space-y-6">
+      
+      <!-- Top Input Panel: File Dropzone & Manual Input -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        <!-- Input Mode Box -->
+        <div class="lg:col-span-1 bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4 shadow-xl">
+          <div>
+            <!-- Input Mode Selector Tabs -->
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+              <div class="flex space-x-2">
+                <button id="input-tab-file" onclick="setInputMode('file')" class="px-2.5 py-1 rounded-md text-xs font-semibold bg-brand-600 text-white transition-colors flex items-center space-x-1">
+                  <i data-lucide="file-up" class="w-3.5 h-3.5"></i>
+                  <span>Upload File</span>
+                </button>
+                <button id="input-tab-manual" onclick="setInputMode('manual')" class="px-2.5 py-1 rounded-md text-xs font-semibold bg-slate-800 text-slate-400 hover:text-white transition-colors flex items-center space-x-1">
+                  <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
+                  <span>Paste Text</span>
+                </button>
+              </div>
+              <button onclick="loadSampleData()" class="text-[11px] text-brand-400 hover:underline flex items-center space-x-1">
+                <i data-lucide="sparkles" class="w-3 h-3"></i>
+                <span>Demo Data</span>
+              </button>
+            </div>
+
+            <!-- FILE UPLOAD DROPZONE -->
+            <div id="mode-file-container" class="space-y-3">
+              <div id="drop-zone" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleFileDrop(event)"
+                   onclick="document.getElementById('file-input').click()"
+                   class="border-2 border-dashed border-slate-700 hover:border-brand-500 bg-slate-950/60 hover:bg-slate-950 rounded-xl p-6 text-center cursor-pointer transition-all flex flex-col items-center justify-center space-y-2 group">
+                <div class="p-3 bg-slate-800 group-hover:bg-brand-600/20 text-slate-400 group-hover:text-brand-400 rounded-full transition-colors">
+                  <i data-lucide="upload-cloud" class="w-6 h-6"></i>
+                </div>
+                <div>
+                  <p class="text-xs font-semibold text-slate-200">Click or Drag & Drop File</p>
+                  <p class="text-[11px] text-slate-400 mt-0.5">Supports <span class="text-brand-400 font-mono font-medium">.xlsx, .xls, .pdf, .csv, .txt</span></p>
+                </div>
+                <input type="file" id="file-input" onchange="handleFileSelect(event)" accept=".xlsx,.xls,.pdf,.csv,.txt" class="hidden">
+              </div>
+
+              <!-- Column Selector for Excel Files -->
+              <div id="excel-col-picker" class="hidden bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs space-y-1.5">
+                <label class="text-slate-300 font-semibold flex items-center space-x-1">
+                  <i data-lucide="columns" class="w-3.5 h-3.5 text-brand-400"></i>
+                  <span>Select Phone Column:</span>
+                </label>
+                <select id="excel-column-select" onchange="parseSelectedExcelColumn()" class="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-slate-200 text-xs focus:outline-none focus:border-brand-500">
+                </select>
+              </div>
+
+              <!-- Active File Status Card -->
+              <div id="file-preview-card" class="hidden bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between">
+                <div class="flex items-center space-x-2.5 overflow-hidden">
+                  <div id="file-type-icon" class="p-2 bg-emerald-500/10 text-emerald-400 rounded-lg shrink-0">
+                    <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+                  </div>
+                  <div class="truncate">
+                    <p id="file-name-display" class="text-xs font-semibold text-white truncate">contacts.xlsx</p>
+                    <p id="file-meta-display" class="text-[11px] text-slate-400">124 KB • 12 numbers extracted</p>
+                  </div>
+                </div>
+                <button onclick="clearLoadedFile()" class="text-slate-400 hover:text-rose-400 p-1" title="Remove File">
+                  <i data-lucide="x-circle" class="w-4 h-4"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- MANUAL TEXT INPUT -->
+            <div id="mode-manual-container" class="hidden space-y-2">
+              <p class="text-xs text-slate-400">Paste phone numbers (one per line or separated by commas):</p>
+              <textarea id="bulk-input" rows="6" placeholder="4804791999&#10;6233021738&#10;6237481458&#10;+12025550143" 
+                        class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none resize-none"></textarea>
+            </div>
+          </div>
+          
+          <div class="flex items-center space-x-3 pt-2">
+            <button id="run-validation-btn" onclick="runBulkValidation()" class="flex-1 bg-brand-600 hover:bg-brand-500 disabled:opacity-60 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl font-medium text-sm transition-all flex items-center justify-center space-x-2 shadow-lg shadow-brand-600/20 active:scale-95">
+              <i data-lucide="play" class="w-4 h-4"></i>
+              <span id="run-validation-text">Validate All</span>
+            </button>
+            <button onclick="clearBulkResults()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-2.5 rounded-xl text-sm transition-colors" title="Clear All">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Metric Summary Cards -->
+        <div class="lg:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div class="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="text-xs font-medium">Total Validated</span>
+              <i data-lucide="database" class="w-4 h-4 text-slate-500"></i>
+            </div>
+            <div class="mt-2">
+              <span id="metric-total" class="text-3xl font-extrabold text-white">0</span>
+              <span class="text-xs text-slate-500 ml-1">numbers</span>
+            </div>
+            <div class="mt-2 h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+              <div id="bar-total" class="h-full bg-brand-500 w-0 transition-all duration-500"></div>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+            <div class="flex items-center justify-between text-emerald-400">
+              <span class="text-xs font-medium">Cell Phones</span>
+              <i data-lucide="smartphone" class="w-4 h-4"></i>
+            </div>
+            <div class="mt-2">
+              <span id="metric-cell" class="text-3xl font-extrabold text-emerald-400">0</span>
+              <span id="metric-cell-pct" class="text-xs text-emerald-500/80 ml-1">(0%)</span>
+            </div>
+            <div class="mt-2 h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+              <div id="bar-cell" class="h-full bg-emerald-500 w-0 transition-all duration-500"></div>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+            <div class="flex items-center justify-between text-purple-400">
+              <span class="text-xs font-medium">Landlines</span>
+              <i data-lucide="phone-fixed" class="w-4 h-4"></i>
+            </div>
+            <div class="mt-2">
+              <span id="metric-landline" class="text-3xl font-extrabold text-purple-400">0</span>
+              <span id="metric-landline-pct" class="text-xs text-purple-500/80 ml-1">(0%)</span>
+            </div>
+            <div class="mt-2 h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+              <div id="bar-landline" class="h-full bg-purple-500 w-0 transition-all duration-500"></div>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between shadow-lg">
+            <div class="flex items-center justify-between text-amber-400">
+              <span class="text-xs font-medium">VoIP / Toll-Free / Other</span>
+              <i data-lucide="help-circle" class="w-4 h-4"></i>
+            </div>
+            <div class="mt-2">
+              <span id="metric-unknown" class="text-3xl font-extrabold text-amber-400">0</span>
+              <span id="metric-unknown-pct" class="text-xs text-amber-500/80 ml-1">(0%)</span>
+            </div>
+            <div class="mt-2 h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+              <div id="bar-unknown" class="h-full bg-amber-500 w-0 transition-all duration-500"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Spreadsheet View Results Table -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden flex flex-col">
+        <!-- Table Control Header -->
+        <div class="p-4 border-b border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div class="flex items-center space-x-3">
+            <div class="p-1.5 bg-emerald-500/10 text-emerald-400 rounded-lg">
+              <i data-lucide="table" class="w-5 h-5"></i>
+            </div>
+            <div>
+              <h3 class="font-semibold text-white text-sm sm:text-base">Validation Spreadsheet Output</h3>
+              <p class="text-xs text-slate-400">Current carrier details when live lookup is configured; every fallback is labelled</p>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center space-x-2 w-full sm:w-auto justify-end gap-y-2">
+            <!-- Filter Dropdown -->
+            <select id="type-filter" onchange="renderResultsTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-brand-500">
+              <option value="ALL">All Line Types</option>
+              <option value="Cell Phone">Cell Phone Only</option>
+              <option value="Landline">Landline Only</option>
+              <option value="Fixed or Mobile">Fixed or Mobile (Uncertain)</option>
+              <option value="VoIP">VoIP Only</option>
+              <option value="Toll-Free">Toll-Free Only</option>
+              <option value="OTHER">Premium / Pager / Other</option>
+              <option value="INVALID">Invalid Only</option>
+            </select>
+
+            <!-- Export Excel Button -->
+            <button onclick="exportToExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i>
+              <span>Export Excel</span>
+            </button>
+            
+            <!-- Export CSV Button -->
+            <button onclick="exportToCSV()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5">
+              <i data-lucide="download" class="w-3.5 h-3.5"></i>
+              <span>Export CSV</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Table Container -->
+        <div class="overflow-x-auto min-h-[300px]">
+          <table class="w-full text-left text-sm border-collapse">
+            <thead>
+              <tr class="bg-slate-950/60 border-b border-slate-800 text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                <th class="py-3 px-4">#</th>
+                <th class="py-3 px-4">Phone Number</th>
+                <th class="py-3 px-4">Line Type</th>
+                <th class="py-3 px-4">Current Carrier / Operator</th>
+                <th class="py-3 px-4">Portability</th>
+                <th class="py-3 px-4">Location / Region</th>
+                <th class="py-3 px-4">Lookup Source</th>
+                <th class="py-3 px-4">Format</th>
+                <th class="py-3 px-4 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="results-table-body" class="divide-y divide-slate-800/60 font-mono text-xs">
+              <!-- Empty state default -->
+              <tr id="empty-table-row">
+                <td colspan="9" class="py-12 text-center text-slate-500 font-sans">
+                  <i data-lucide="file-text" class="w-8 h-8 mx-auto mb-2 text-slate-600"></i>
+                  <p>No phone numbers loaded or processed yet.</p>
+                  <p class="text-xs text-slate-600 mt-1">Upload an Excel/PDF/CSV file or paste numbers above to start.</p>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: SINGLE LOOKUP INSPECTOR -->
+    <section id="view-single" class="hidden space-y-6">
+      <div class="max-w-3xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+        <div>
+          <h2 class="text-lg font-bold text-white flex items-center space-x-2">
+            <i data-lucide="shield-check" class="w-5 h-5 text-brand-500"></i>
+            <span>Deep Phone Inspection</span>
+          </h2>
+          <p class="text-xs text-slate-400">Detailed telecom routing, area code breakdown, and formatting analysis.</p>
+        </div>
+
+        <div class="flex flex-col sm:flex-row gap-3">
+          <input type="text" id="single-phone-input" placeholder="Enter number e.g. 4804791999 or +1 (480) 479-1999" value="4804791999" 
+                 class="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-base font-mono text-white focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none">
+          <button onclick="inspectSinglePhone()" class="bg-brand-600 hover:bg-brand-500 text-white px-6 py-3 rounded-xl font-medium text-sm transition-all flex items-center justify-center space-x-2 shadow-lg shadow-brand-600/20">
+            <i data-lucide="search" class="w-4 h-4"></i>
+            <span>Inspect Phone</span>
+          </button>
+        </div>
+        <label class="flex items-center space-x-2 text-xs text-slate-400">
+          <input id="single-refresh-live" type="checkbox" class="rounded border-slate-700 bg-slate-950 text-brand-500 focus:ring-brand-500">
+          <span>Force a fresh live lookup (bypasses cache and may incur a provider charge)</span>
+        </label>
+
+        <!-- Single Inspection Card Result -->
+        <div id="single-result-card" class="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+            <div>
+              <span class="text-xs text-slate-500 uppercase tracking-wider block">Raw Query</span>
+              <span id="single-display-number" class="text-xl font-mono font-bold text-white">4804791999</span>
+            </div>
+            <div id="single-type-badge">
+              <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                Cell Phone
+              </span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs font-mono">
+            <div>
+              <span class="text-slate-500 block font-sans">E.164 Format:</span>
+              <span id="single-e164" class="text-slate-200 font-semibold">+14804791999</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">National Format:</span>
+              <span id="single-national" class="text-slate-200 font-semibold">(480) 479-1999</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Country Code:</span>
+              <span id="single-country" class="text-slate-200 font-semibold">+1 (US/CA)</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Current Carrier:</span>
+              <span id="single-carrier" class="text-slate-200 font-semibold">T-Mobile USA</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Location / State:</span>
+              <span id="single-location" class="text-slate-200 font-semibold">Arizona (Mesa/Phoenix)</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Number Validity:</span>
+              <span id="single-valid" class="text-emerald-400 font-semibold flex items-center space-x-1">
+                <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i>
+                <span>Valid Number</span>
+              </span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Line Subtype:</span>
+              <span id="single-subtype" class="text-slate-200 font-semibold">Mobile</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Ported Status:</span>
+              <span id="single-ported" class="text-slate-200 font-semibold">Unknown</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Ported Date:</span>
+              <span id="single-ported-date" class="text-slate-200 font-semibold">N/A</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">LRN / OCN:</span>
+              <span id="single-routing" class="text-slate-200 font-semibold">N/A</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">MCC / MNC:</span>
+              <span id="single-network-codes" class="text-slate-200 font-semibold">N/A</span>
+            </div>
+            <div>
+              <span class="text-slate-500 block font-sans">Data Freshness:</span>
+              <span id="single-freshness" class="text-slate-200 font-semibold">Offline metadata</span>
+            </div>
+          </div>
+
+          <div id="single-lookup-warning" class="hidden p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 font-sans"></div>
+
+          <div class="p-3 bg-slate-900 border border-slate-800/60 rounded-lg text-xs text-slate-400 font-sans flex items-start space-x-2">
+            <i data-lucide="info" class="w-4 h-4 text-brand-400 shrink-0 mt-0.5"></i>
+            <p id="single-explanation">
+              Area code <strong>480</strong> is allocated to Arizona. The 479 exchange is designated for mobile wireless spectrum block (Cell Phone routing).
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: API & INTEGRATIONS CODE GENERATOR -->
+    <section id="view-docs" class="hidden space-y-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+        <div>
+          <h2 class="text-lg font-bold text-white flex items-center space-x-2">
+            <i data-lucide="code" class="w-5 h-5 text-brand-500"></i>
+            <span>REST API Integration & Code Snippets</span>
+          </h2>
+          <p class="text-xs text-slate-400">Easily integrate line type validation into Python, Node.js, cURL, or directly into Google Sheets.</p>
+        </div>
+
+        <!-- Language Selector Buttons -->
+        <div class="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+          <button onclick="setDocLanguage('gsheet')" id="lang-btn-gsheet" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand-600 text-white transition-colors flex items-center space-x-1">
+            <i data-lucide="sheet" class="w-3.5 h-3.5"></i>
+            <span>Google Sheets (Apps Script)</span>
+          </button>
+          <button onclick="setDocLanguage('python')" id="lang-btn-python" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-slate-300 hover:text-white transition-colors flex items-center space-x-1">
+            <i data-lucide="file-code" class="w-3.5 h-3.5"></i>
+            <span>Python (FastAPI / Requests)</span>
+          </button>
+          <button onclick="setDocLanguage('javascript')" id="lang-btn-javascript" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-slate-300 hover:text-white transition-colors flex items-center space-x-1">
+            <i data-lucide="file-json" class="w-3.5 h-3.5"></i>
+            <span>Node.js / Fetch</span>
+          </button>
+          <button onclick="setDocLanguage('curl')" id="lang-btn-curl" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 text-slate-300 hover:text-white transition-colors flex items-center space-x-1">
+            <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+            <span>cURL Command</span>
+          </button>
+        </div>
+
+        <!-- Code Snippet Display -->
+        <div class="relative bg-slate-950 border border-slate-800 rounded-xl p-4">
+          <button onclick="copyCodeSnippet()" class="absolute top-3 right-3 bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-md text-xs font-medium flex items-center space-x-1 transition-colors">
+            <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+            <span id="copy-btn-text">Copy Code</span>
+          </button>
+          <pre id="code-snippet-box" class="font-mono text-xs text-slate-200 overflow-x-auto p-2 leading-relaxed"></pre>
+        </div>
+
+        <!-- Google Sheets Guide Banner -->
+        <div id="gsheet-instructions" class="bg-brand-950/40 border border-brand-500/20 rounded-xl p-4 text-xs text-slate-300 space-y-2">
+          <h4 class="font-bold text-brand-400 flex items-center space-x-1.5">
+            <i data-lucide="lightbulb" class="w-4 h-4"></i>
+            <span>How to use this in Google Sheets:</span>
+          </h4>
+          <ol class="list-decimal list-inside space-y-1 text-slate-400">
+            <li>In Google Sheets, go to <strong class="text-slate-200">Extensions &gt; Apps Script</strong>.</li>
+            <li>Paste the custom function code copied above and save the script.</li>
+            <li>In your sheet cell (e.g. B2), type: <code class="bg-slate-900 px-1.5 py-0.5 rounded font-mono text-brand-300">=CHECK_LINE_TYPE(A2)</code></li>
+            <li>Drag down to validate all phone numbers automatically!</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="font-bold text-white text-base flex items-center space-x-2">
+          <i data-lucide="settings" class="w-5 h-5 text-brand-500"></i>
+          <span>Lookup Settings</span>
+        </h3>
+        <button onclick="toggleSettingsModal()" class="text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Default Country</label>
+          <select id="setting-region" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-brand-500">
+            <option value="US">United States / Canada (US)</option>
+            <option value="GB">United Kingdom (GB)</option>
+            <option value="AU">Australia (AU)</option>
+            <option value="PK">Pakistan (PK)</option>
+            <option value="IN">India (IN)</option>
+            <option value="AE">United Arab Emirates (AE)</option>
+          </select>
+          <p class="text-slate-500 text-[11px] mt-1">Used only when a number does not begin with an international + country code.</p>
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Lookup Mode</label>
+          <select id="setting-lookup-mode" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-brand-500">
+            <option value="auto">Best Available (Live + Offline Fallback)</option>
+            <option value="live">Require Live (Flag Any Fallback)</option>
+            <option value="offline">Offline Only (No Provider Charge)</option>
+          </select>
+          <p class="text-slate-500 text-[11px] mt-1">Live providers may charge per unique number. Cached duplicates normally avoid a new request.</p>
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Classification Engine</label>
+          <div id="engine-status" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-amber-400 font-mono">Checking configuration...</div>
+          <p id="engine-help" class="text-slate-500 text-[11px] mt-1">Checking whether live carrier intelligence is configured.</p>
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2 pt-2">
+        <button onclick="saveSettings()" class="bg-brand-600 hover:bg-brand-500 text-white px-4 py-2 rounded-xl font-medium text-xs transition-colors">
+          Save Preferences
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full Network Details Modal -->
+  <div id="details-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div>
+          <h3 class="font-bold text-white text-base flex items-center space-x-2">
+            <i data-lucide="radio-tower" class="w-5 h-5 text-brand-500"></i>
+            <span>Complete Network Details</span>
+          </h3>
+          <p id="details-number" class="text-xs font-mono text-slate-400 mt-1"></p>
+        </div>
+        <button onclick="closeDetailsModal()" class="text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div id="details-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+      <div id="details-note" class="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-400"></div>
+      <div class="flex justify-end">
+        <button onclick="closeDetailsModal()" class="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-xl text-xs font-medium">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JavaScript Application Logic -->
+  <script>
+    // State Management
+    let validatedResults = [];
+    let parsedNumbersFromFile = [];
+    let currentInputMode = 'file'; // 'file' or 'manual'
+    let currentTab = 'dashboard';
+    let currentDocLang = 'gsheet';
+    let rawWorkbook = null;
+    let engineInfo = { live_enabled: null };
+    let appSettings = {
+      defaultRegion: localStorage.getItem('numverify_default_region') || 'US',
+      lookupMode: localStorage.getItem('numverify_lookup_mode') || 'auto'
+    };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      document.getElementById('setting-region').value = appSettings.defaultRegion;
+      document.getElementById('setting-lookup-mode').value = appSettings.lookupMode;
+      refreshEngineStatus();
+      updateCodeSnippet();
+    });
+
+    async function refreshEngineStatus() {
+      const badge = document.getElementById('lookup-mode-badge');
+      const status = document.getElementById('engine-status');
+      const help = document.getElementById('engine-help');
+      try {
+        const response = await fetch('/engine');
+        const data = await response.json();
+        engineInfo = data;
+        if (data.live_enabled) {
+          const fallback = data.fallback_providers?.length ? ` • fallback: ${data.fallback_providers.join(', ')}` : '';
+          badge.innerText = `Live: ${data.active_provider}`;
+          badge.className = 'hidden sm:inline px-2 py-0.5 text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full';
+          status.innerText = `${data.active_provider}${fallback} • ${data.cache_hours}h cache`;
+          status.className = 'w-full bg-slate-950 border border-emerald-500/30 rounded-lg p-2 text-emerald-400 font-mono';
+          help.innerText = 'Live carrier data is enabled. Provider charges can apply. No service can guarantee 100% accuracy or prove reachability.';
+        } else if (data.database_ready) {
+          badge.innerText = 'Offline fallback only';
+          badge.className = 'hidden sm:inline px-2 py-0.5 text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full';
+          status.innerText = `No live provider configured • ${data.rules_version || 'nationwide carrier rules'} • NANPA ${data.file_updated || 'date unavailable'}`;
+          status.className = 'w-full bg-slate-950 border border-amber-500/30 rounded-lg p-2 text-amber-400 font-mono';
+          help.innerText = 'Free offline carrier-family rules cover every U.S. time zone. Time zone does not determine line type, and ported numbers still require live data.';
+        } else {
+          badge.innerText = 'Basic offline mode';
+          badge.className = 'hidden sm:inline px-2 py-0.5 text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full';
+          status.innerText = 'NANPA prefix database is missing';
+          status.className = 'w-full bg-slate-950 border border-amber-500/30 rounded-lg p-2 text-amber-400 font-mono';
+          help.innerText = 'Run update_offline_database.bat (Windows) or update_offline_database.sh (macOS/Linux), then restart the portal.';
+        }
+      } catch (error) {
+        badge.innerText = 'Engine unavailable';
+        status.innerText = 'Python backend is not responding';
+        status.className = 'w-full bg-slate-950 border border-rose-500/30 rounded-lg p-2 text-rose-400 font-mono';
+      }
+    }
+
+    // Navigation Switcher
+    function switchTab(tab) {
+      currentTab = tab;
+      ['dashboard', 'single', 'docs'].forEach(t => {
+        const view = document.getElementById(`view-${t}`);
+        const btn = document.getElementById(`tab-btn-${t}`);
+        if (t === tab) {
+          view.classList.remove('hidden');
+          btn.classList.add('bg-slate-800', 'text-white');
+          btn.classList.remove('text-slate-400');
+        } else {
+          view.classList.add('hidden');
+          btn.classList.remove('bg-slate-800', 'text-white');
+          btn.classList.add('text-slate-400');
+        }
+      });
+    }
+
+    // Modal Control
+    function toggleSettingsModal() {
+      document.getElementById('settings-modal').classList.toggle('hidden');
+    }
+
+    function saveSettings() {
+      appSettings.defaultRegion = document.getElementById('setting-region').value;
+      appSettings.lookupMode = document.getElementById('setting-lookup-mode').value;
+      localStorage.setItem('numverify_default_region', appSettings.defaultRegion);
+      localStorage.setItem('numverify_lookup_mode', appSettings.lookupMode);
+      toggleSettingsModal();
+    }
+
+    // Input Mode Switcher (File vs Manual)
+    function setInputMode(mode) {
+      currentInputMode = mode;
+      const fileBtn = document.getElementById('input-tab-file');
+      const manualBtn = document.getElementById('input-tab-manual');
+      const fileContainer = document.getElementById('mode-file-container');
+      const manualContainer = document.getElementById('mode-manual-container');
+
+      if (mode === 'file') {
+        fileBtn.classList.add('bg-brand-600', 'text-white');
+        fileBtn.classList.remove('bg-slate-800', 'text-slate-400');
+        manualBtn.classList.remove('bg-brand-600', 'text-white');
+        manualBtn.classList.add('bg-slate-800', 'text-slate-400');
+
+        fileContainer.classList.remove('hidden');
+        manualContainer.classList.add('hidden');
+      } else {
+        manualBtn.classList.add('bg-brand-600', 'text-white');
+        manualBtn.classList.remove('bg-slate-800', 'text-slate-400');
+        fileBtn.classList.remove('bg-brand-600', 'text-white');
+        fileBtn.classList.add('bg-slate-800', 'text-slate-400');
+
+        manualContainer.classList.remove('hidden');
+        fileContainer.classList.add('hidden');
+      }
+    }
+
+    // File Drag & Drop Handling
+    function handleDragOver(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('drop-zone').classList.add('border-brand-500', 'bg-brand-500/10');
+    }
+
+    function handleDragLeave(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('drop-zone').classList.remove('border-brand-500', 'bg-brand-500/10');
+    }
+
+    function handleFileDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('drop-zone').classList.remove('border-brand-500', 'bg-brand-500/10');
+      const files = e.dataTransfer.files;
+      if (files.length > 0) processUploadedFile(files[0]);
+    }
+
+    function handleFileSelect(e) {
+      const files = e.target.files;
+      if (files.length > 0) processUploadedFile(files[0]);
+    }
+
+    // File Processing Router (.xlsx, .pdf, .csv, .txt)
+    async function processUploadedFile(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      parsedNumbersFromFile = [];
+
+      showFilePreview(file.name, `${(file.size / 1024).toFixed(1)} KB • Reading...`);
+
+      if (ext === 'xlsx' || ext === 'xls') {
+        readExcelFile(file);
+      } else if (ext === 'pdf') {
+        readPDFFile(file);
+      } else if (ext === 'csv' || ext === 'txt') {
+        readTextOrCSVFile(file);
+      } else {
+        alert("Unsupported file format. Please upload .xlsx, .xls, .pdf, .csv, or .txt");
+      }
+    }
+
+    // Excel Parsing using SheetJS
+    function readExcelFile(file) {
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const data = new Uint8Array(e.target.result);
+        rawWorkbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = rawWorkbook.SheetNames[0];
+        const worksheet = rawWorkbook.Sheets[firstSheetName];
+        
+        // Convert to JSON headers
+        const jsonRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        if (jsonRows.length === 0) return;
+
+        const headers = jsonRows[0];
+        const colSelect = document.getElementById('excel-column-select');
+        colSelect.innerHTML = '';
+
+        headers.forEach((h, idx) => {
+          const opt = document.createElement('option');
+          opt.value = idx;
+          opt.innerText = h || `Column ${idx + 1}`;
+          colSelect.appendChild(opt);
+        });
+
+        document.getElementById('excel-col-picker').classList.remove('hidden');
+        parseSelectedExcelColumn();
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function parseSelectedExcelColumn() {
+      if (!rawWorkbook) return;
+      const firstSheetName = rawWorkbook.SheetNames[0];
+      const worksheet = rawWorkbook.Sheets[firstSheetName];
+      const jsonRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      const colIdx = parseInt(document.getElementById('excel-column-select').value);
+      parsedNumbersFromFile = [];
+
+      for (let i = 1; i < jsonRows.length; i++) {
+        const row = jsonRows[i];
+        if (row && row[colIdx] !== undefined) {
+          const val = String(row[colIdx]).trim();
+          if (val) parsedNumbersFromFile.push(val);
+        }
+      }
+
+      showFilePreview("Excel Spreadsheet", `${parsedNumbersFromFile.length} numbers extracted from column`);
+    }
+
+    // PDF Text & Regex Phone Extraction using PDF.js
+    async function readPDFFile(file) {
+      document.getElementById('excel-col-picker').classList.add('hidden');
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      
+      let fullText = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map(item => item.str).join(" ");
+        fullText += " " + pageText;
+      }
+
+      // Regex matching phone numbers (10 digits or formatted)
+      const phoneRegex = /(?:\+?1\s*[-.\s]?)?\(?([2-9]\d{2})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})/g;
+      const matches = fullText.match(phoneRegex) || [];
+
+      // Deduplicate numbers
+      const uniqueNumbers = [...new Set(matches.map(m => m.trim()))];
+      parsedNumbersFromFile = uniqueNumbers;
+
+      showFilePreview(file.name, `PDF • ${uniqueNumbers.length} unique numbers extracted`);
+    }
+
+    // CSV and TXT Reader
+    function readTextOrCSVFile(file) {
+      document.getElementById('excel-col-picker').classList.add('hidden');
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result;
+        const lines = text.split(/[\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+        parsedNumbersFromFile = lines;
+        showFilePreview(file.name, `CSV/Text • ${lines.length} numbers loaded`);
+      };
+      reader.readAsText(file);
+    }
+
+    function showFilePreview(fileName, metaText) {
+      document.getElementById('file-preview-card').classList.remove('hidden');
+      document.getElementById('file-name-display').innerText = fileName;
+      document.getElementById('file-meta-display').innerText = metaText;
+    }
+
+    function clearLoadedFile() {
+      parsedNumbersFromFile = [];
+      rawWorkbook = null;
+      document.getElementById('file-input').value = '';
+      document.getElementById('file-preview-card').classList.add('hidden');
+      document.getElementById('excel-col-picker').classList.add('hidden');
+    }
+
+    // Demo Data Loader
+    function loadSampleData() {
+      setInputMode('manual');
+      const sampleText = "4804791999\n6233021738\n6237481458\n2025550143\n8005550199\n6239351000";
+      document.getElementById('bulk-input').value = sampleText;
+    }
+
+    // Core Phone Validation Logic
+    async function lookupPhoneNumber(rawNumber, refreshLive = false) {
+      const params = new URLSearchParams({
+        phone: rawNumber,
+        default_region: appSettings.defaultRegion,
+        lookup_mode: appSettings.lookupMode,
+        refresh_live: refreshLive ? 'true' : 'false'
+      });
+      const response = await fetch(`/validate?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Validation API returned ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function runBulkValidation() {
+      let targets = [];
+
+      if (currentInputMode === 'file') {
+        targets = parsedNumbersFromFile;
+      } else {
+        const rawText = document.getElementById('bulk-input').value.trim();
+        if (rawText) {
+          targets = rawText.split(/[\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+        }
+      }
+
+      if (targets.length === 0) {
+        alert("Please upload a file or enter phone numbers to validate.");
+        return;
+      }
+
+      const uniqueTargetCount = new Set(targets.map(value => String(value).trim())).size;
+      const willUseLive = appSettings.lookupMode !== 'offline' && engineInfo.live_enabled !== false;
+      if (willUseLive) {
+        const approved = confirm(
+          `This batch contains ${uniqueTargetCount.toLocaleString()} unique number(s). ` +
+          `Live provider lookups may incur per-number charges; recent cached results are reused. Continue?`
+        );
+        if (!approved) return;
+      }
+
+      const button = document.getElementById('run-validation-btn');
+      const buttonText = document.getElementById('run-validation-text');
+      button.disabled = true;
+      validatedResults = [];
+
+      try {
+        // Smaller live chunks provide frequent progress updates while the backend
+        // safely limits provider concurrency. Offline processing remains faster.
+        const chunkSize = willUseLive ? 100 : 1000;
+        for (let start = 0; start < targets.length; start += chunkSize) {
+          const chunk = targets.slice(start, start + chunkSize);
+          buttonText.innerText = `Validating ${Math.min(start + chunk.length, targets.length)} / ${targets.length}`;
+
+          const response = await fetch('/validate/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              numbers: chunk,
+              default_region: appSettings.defaultRegion,
+              lookup_mode: appSettings.lookupMode,
+              refresh_live: false
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error(`Validation API returned ${response.status}`);
+          }
+
+          const data = await response.json();
+          validatedResults.push(...data.results);
+          updateMetrics();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        renderResultsTable();
+      } catch (error) {
+        console.error(error);
+        alert(`Validation could not be completed: ${error.message}. Confirm the local server is running.`);
+      } finally {
+        button.disabled = false;
+        buttonText.innerText = 'Validate All';
+      }
+    }
+
+    function updateMetrics() {
+      const total = validatedResults.length;
+      const cell = validatedResults.filter(r => r.lineType === 'Cell Phone').length;
+      const landline = validatedResults.filter(r => r.lineType === 'Landline').length;
+      const unknown = total - cell - landline;
+
+      document.getElementById('metric-total').innerText = total;
+      document.getElementById('metric-cell').innerText = cell;
+      document.getElementById('metric-landline').innerText = landline;
+      document.getElementById('metric-unknown').innerText = unknown;
+
+      const cellPct = total > 0 ? Math.round((cell / total) * 100) : 0;
+      const landlinePct = total > 0 ? Math.round((landline / total) * 100) : 0;
+      const unknownPct = total > 0 ? Math.round((unknown / total) * 100) : 0;
+
+      document.getElementById('metric-cell-pct').innerText = `(${cellPct}%)`;
+      document.getElementById('metric-landline-pct').innerText = `(${landlinePct}%)`;
+      document.getElementById('metric-unknown-pct').innerText = `(${unknownPct}%)`;
+
+      document.getElementById('bar-total').style.width = total > 0 ? '100%' : '0%';
+      document.getElementById('bar-cell').style.width = `${cellPct}%`;
+      document.getElementById('bar-landline').style.width = `${landlinePct}%`;
+      document.getElementById('bar-unknown').style.width = `${unknownPct}%`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      })[character]);
+    }
+
+    function lineTypeBadge(lineType) {
+      const configurations = {
+        'Cell Phone': ['bg-emerald-500/10 text-emerald-400 border-emerald-500/30', 'smartphone'],
+        'Landline': ['bg-purple-500/10 text-purple-400 border-purple-500/30', 'phone-fixed'],
+        'VoIP': ['bg-cyan-500/10 text-cyan-400 border-cyan-500/30', 'phone-call'],
+        'Toll-Free': ['bg-blue-500/10 text-blue-400 border-blue-500/30', 'headphones'],
+        'Premium Rate': ['bg-rose-500/10 text-rose-400 border-rose-500/30', 'badge-dollar-sign'],
+        'Pager': ['bg-fuchsia-500/10 text-fuchsia-400 border-fuchsia-500/30', 'radio'],
+        'Satellite': ['bg-indigo-500/10 text-indigo-400 border-indigo-500/30', 'satellite'],
+      };
+      return configurations[lineType] || ['bg-amber-500/10 text-amber-400 border-amber-500/30', 'help-circle'];
+    }
+
+    function renderResultsTable() {
+      const tbody = document.getElementById('results-table-body');
+      const filter = document.getElementById('type-filter').value;
+      const primaryTypes = ['Cell Phone', 'Landline', 'Fixed or Mobile', 'VoIP', 'Toll-Free'];
+
+      let filtered = validatedResults;
+      if (filter === 'INVALID') {
+        filtered = validatedResults.filter(result => !result.valid);
+      } else if (filter === 'OTHER') {
+        filtered = validatedResults.filter(result => result.valid && !primaryTypes.includes(result.lineType));
+      } else if (filter !== 'ALL') {
+        filtered = validatedResults.filter(result => result.valid && result.lineType === filter);
+      }
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="9" class="py-12 text-center text-slate-500 font-sans">
+              <p>No numbers matched the selected filter.</p>
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map((item, index) => {
+        const [badgeStyle, badgeIcon] = lineTypeBadge(item.lineType);
+        const originalIndex = validatedResults.indexOf(item);
+        const portedStyle = item.ported === true
+          ? 'text-fuchsia-400'
+          : item.ported === false
+          ? 'text-emerald-400'
+          : 'text-slate-500';
+        const sourceStyle = item.liveLookup && !item.fallbackUsed ? 'text-emerald-400' : 'text-amber-400';
+        const sourceIcon = item.liveLookup && !item.fallbackUsed ? 'radio-tower' : 'database';
+
+        return `
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-3 px-4 text-slate-500">${index + 1}</td>
+            <td class="py-3 px-4">
+              <div class="font-semibold text-white">${escapeHtml(item.number)}</div>
+              <div class="text-[10px] text-slate-500">${escapeHtml(item.e164 || '')}</div>
+            </td>
+            <td class="py-3 px-4">
+              <div class="inline-flex items-center space-x-1 px-3 py-1 rounded-lg border text-xs font-semibold ${badgeStyle}">
+                <i data-lucide="${badgeIcon}" class="w-3.5 h-3.5"></i>
+                <span>${escapeHtml(item.lineType)}</span>
+              </div>
+              <div class="text-[10px] text-slate-500 mt-1">${escapeHtml(item.lineSubtype || '')}</div>
+            </td>
+            <td class="py-3 px-4">
+              <div class="text-slate-300">${escapeHtml(item.carrier || 'Not returned')}</div>
+              ${item.normalizedCarrier ? `<div class="text-[10px] text-slate-500">Normalized: ${escapeHtml(item.normalizedCarrier)}</div>` : ''}
+            </td>
+            <td class="py-3 px-4">
+              <div class="font-semibold ${portedStyle}">${escapeHtml(item.portedStatus || 'Unknown')}</div>
+              ${item.portedDate ? `<div class="text-[10px] text-slate-500">${escapeHtml(item.portedDate)}</div>` : ''}
+            </td>
+            <td class="py-3 px-4 text-slate-400">${escapeHtml(item.location || 'Unknown')}</td>
+            <td class="py-3 px-4">
+              <span class="inline-flex items-start space-x-1 ${sourceStyle}">
+                <i data-lucide="${sourceIcon}" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i>
+                <span>${escapeHtml(item.lookupSource || 'Offline metadata')}</span>
+              </span>
+              <div class="text-[10px] text-slate-500 mt-1">${escapeHtml(item.dataFreshness || item.classificationConfidence || '')}</div>
+              ${item.lookupError ? `<div class="text-[10px] text-rose-400 mt-1">Fallback/error — open details</div>` : ''}
+            </td>
+            <td class="py-3 px-4">
+              ${item.valid
+                ? '<span class="text-emerald-400 font-semibold">Valid format</span>'
+                : '<span class="text-rose-400 font-semibold">Invalid</span>'}
+            </td>
+            <td class="py-3 px-4 text-right whitespace-nowrap">
+              <button onclick="showDetails(${originalIndex})" class="text-brand-400 hover:text-brand-300 p-1" title="View all network details">
+                <i data-lucide="eye" class="w-4 h-4"></i>
+              </button>
+              <button onclick="copyResult(${originalIndex})" class="text-slate-400 hover:text-white p-1" title="Copy full result">
+                <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      lucide.createIcons();
+    }
+
+    function displayValue(value) {
+      if (value === true) return 'Yes';
+      if (value === false) return 'No';
+      if (Array.isArray(value)) return value.length ? value.join(', ') : 'N/A';
+      return value === null || value === undefined || value === '' ? 'N/A' : String(value);
+    }
+
+    function showDetails(index) {
+      const item = validatedResults[index];
+      if (!item) return;
+      const fields = [
+        ['Line Type', item.lineType],
+        ['Line Subtype', item.lineSubtype],
+        ['Current Carrier', item.carrier],
+        ['Normalized Carrier', item.normalizedCarrier],
+        ['Original / Route Carrier', item.originalCarrier],
+        ['Ported Status', item.portedStatus],
+        ['Ported Date', item.portedDate],
+        ['LRN', item.lrn],
+        ['OCN', item.ocn],
+        ['SPID', item.spid],
+        ['Alternate SPID', item.altSpid],
+        ['MCC', item.mobileCountryCode],
+        ['MNC', item.mobileNetworkCode],
+        ['City', item.city],
+        ['State', item.state],
+        ['Country', item.country],
+        ['NPA-NXX Prefix', item.prefix],
+        ['Rate Center', item.rateCenter],
+        ['Pooled Prefix', item.pooledPrefix],
+        ['Lookup Provider', item.lookupProvider],
+        ['Lookup Source', item.lookupSource],
+        ['Lookup Time', item.lookupTimestamp],
+        ['Data Freshness', item.dataFreshness],
+        ['Confidence', item.classificationConfidence],
+        ['Live Lookup', item.liveLookup],
+        ['Cache Hit', item.cacheHit],
+        ['Fallback Used', item.fallbackUsed],
+        ['Provider Error Code', item.providerErrorCode],
+        ['Validation Errors', item.validationErrors],
+        ['Possible Format', item.possible],
+        ['Valid Format', item.valid],
+      ];
+      document.getElementById('details-number').innerText = `${item.e164 || item.number} • ${item.national_format || ''}`;
+      document.getElementById('details-grid').innerHTML = fields.map(([label, value]) => `
+        <div class="bg-slate-950 border border-slate-800 rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-500">${escapeHtml(label)}</div>
+          <div class="text-xs font-mono text-slate-200 mt-1 break-words">${escapeHtml(displayValue(value))}</div>
+        </div>
+      `).join('');
+      const notes = [item.classificationNote, item.lookupError].filter(Boolean).join(' Lookup warning: ');
+      document.getElementById('details-note').innerText = notes || 'No additional provider notes were returned.';
+      document.getElementById('details-modal').classList.remove('hidden');
+      lucide.createIcons();
+    }
+
+    function closeDetailsModal() {
+      document.getElementById('details-modal').classList.add('hidden');
+    }
+
+    function copyResult(index) {
+      const item = validatedResults[index];
+      if (!item) return;
+      copyToClipboard(JSON.stringify(item, null, 2));
+    }
+
+    function clearBulkResults() {
+      document.getElementById('bulk-input').value = '';
+      clearLoadedFile();
+      validatedResults = [];
+      updateMetrics();
+      renderResultsTable();
+    }
+
+    async function inspectSinglePhone() {
+      const val = document.getElementById('single-phone-input').value.trim();
+      if (!val) return;
+
+      try {
+        const refreshLive = document.getElementById('single-refresh-live').checked;
+        if (refreshLive && engineInfo.live_enabled && appSettings.lookupMode !== 'offline') {
+          const approved = confirm('A fresh provider lookup may incur a charge. Continue?');
+          if (!approved) return;
+        }
+        const res = await lookupPhoneNumber(val, refreshLive);
+
+        document.getElementById('single-display-number').innerText = res.number;
+        document.getElementById('single-e164').innerText = res.e164 || 'N/A';
+        document.getElementById('single-national').innerText = res.national_format || res.number;
+        document.getElementById('single-country').innerText = [res.country_code, res.country].filter(Boolean).join(' ') || 'N/A';
+        document.getElementById('single-carrier').innerText = res.carrier || 'Not returned';
+        document.getElementById('single-location').innerText = res.location || 'Unknown';
+        document.getElementById('single-subtype').innerText = res.lineSubtype || res.lineType || 'Unknown';
+        document.getElementById('single-ported').innerText = res.portedStatus || 'Unknown';
+        document.getElementById('single-ported-date').innerText = res.portedDate || 'N/A';
+        document.getElementById('single-routing').innerText = [res.lrn, res.ocn].filter(Boolean).join(' / ') || 'N/A';
+        document.getElementById('single-network-codes').innerText = [res.mobileCountryCode, res.mobileNetworkCode].filter(Boolean).join(' / ') || 'N/A';
+        document.getElementById('single-freshness').innerText = res.dataFreshness || 'Offline metadata';
+
+        const validElement = document.getElementById('single-valid');
+        validElement.className = `${res.valid ? 'text-emerald-400' : 'text-rose-400'} font-semibold flex items-center space-x-1`;
+        validElement.innerHTML = `<i data-lucide="${res.valid ? 'check-circle-2' : 'x-circle'}" class="w-3.5 h-3.5"></i><span>${res.valid ? 'Valid Format' : (res.possible ? 'Possible, Not Valid' : 'Invalid Format')}</span>`;
+
+        const [badgeStyle, badgeIcon] = lineTypeBadge(res.lineType);
+        document.getElementById('single-type-badge').innerHTML = `
+          <span class="inline-flex items-center space-x-1 px-3 py-1 rounded-full text-xs font-semibold border ${badgeStyle}">
+            <i data-lucide="${badgeIcon}" class="w-3.5 h-3.5"></i>
+            <span>${escapeHtml(res.lineType)}</span>
+          </span>`;
+
+        document.getElementById('single-explanation').innerText = !res.valid
+          ? 'This number is not structurally valid for the selected country. Include the full international country code when possible.'
+          : `${res.classificationNote || ''} Source: ${res.lookupSource}. ${res.dataFreshness || ''}`.trim();
+
+        const warning = document.getElementById('single-lookup-warning');
+        if (res.lookupError || res.fallbackUsed) {
+          warning.innerText = res.lookupError || 'A live type was unavailable, so the displayed classification uses offline fallback data.';
+          warning.classList.remove('hidden');
+        } else {
+          warning.innerText = '';
+          warning.classList.add('hidden');
+        }
+        lucide.createIcons();
+      } catch (error) {
+        alert(`Lookup could not be completed: ${error.message}`);
+      }
+    }
+
+    // Export Results as Excel (.xlsx) using SheetJS
+    function exportToExcel() {
+      if (validatedResults.length === 0) {
+        alert("No results available to export.");
+        return;
+      }
+
+      const toExportRows = results => results.map(r => ({
+        "Input": r.raw || "",
+        "Phone Number": r.number || "",
+        "E.164": r.e164 || "",
+        "National Format": r.national_format || "",
+        "Country": r.country || "",
+        "Line Type": r.lineType || "",
+        "Line Subtype": r.lineSubtype || "",
+        "Current Carrier": r.carrier || "",
+        "Normalized Carrier": r.normalizedCarrier || "",
+        "Original / Route Carrier": r.originalCarrier || "",
+        "Ported Status": r.portedStatus || "",
+        "Ported Date": r.portedDate || "",
+        "LRN": r.lrn || "",
+        "OCN": r.ocn || "",
+        "SPID": r.spid || "",
+        "Alternate SPID": r.altSpid || "",
+        "MCC": r.mobileCountryCode || "",
+        "MNC": r.mobileNetworkCode || "",
+        "City": r.city || "",
+        "State": r.state || "",
+        "Location": r.location || "",
+        "NPA-NXX Prefix": r.prefix || "",
+        "Rate Center": r.rateCenter || "",
+        "Pooled Prefix": displayValue(r.pooledPrefix),
+        "Lookup Provider": r.lookupProvider || "",
+        "Lookup Source": r.lookupSource || "Offline metadata",
+        "Lookup Time": r.lookupTimestamp || "",
+        "Data Freshness": r.dataFreshness || "",
+        "Confidence": r.classificationConfidence || "",
+        "Live Lookup": r.liveLookup ? "Yes" : "No",
+        "Cache Hit": r.cacheHit ? "Yes" : "No",
+        "Fallback Used": r.fallbackUsed ? "Yes" : "No",
+        "Lookup Error": r.lookupError || "",
+        "Format Validity": r.valid ? "Valid Format" : (r.possible ? "Possible, Not Valid" : "Invalid"),
+        "Classification Note": r.classificationNote || ""
+      }));
+
+      const workbook = XLSX.utils.book_new();
+      const groups = [
+        ["All Results", validatedResults],
+        ["Cell Phones", validatedResults.filter(r => r.valid && r.lineType === "Cell Phone")],
+        ["Landlines", validatedResults.filter(r => r.valid && r.lineType === "Landline")],
+        ["VoIP", validatedResults.filter(r => r.valid && r.lineType === "VoIP")],
+        ["Toll-Free", validatedResults.filter(r => r.valid && r.lineType === "Toll-Free")],
+        ["Fixed or Mobile", validatedResults.filter(r => r.valid && r.lineType === "Fixed or Mobile")],
+        ["Other Special Types", validatedResults.filter(r => r.valid && !["Cell Phone", "Landline", "VoIP", "Toll-Free", "Fixed or Mobile"].includes(r.lineType))],
+        ["Invalid", validatedResults.filter(r => !r.valid)]
+      ];
+
+      groups.forEach(([sheetName, results]) => {
+        const rows = toExportRows(results);
+        const worksheet = rows.length > 0
+          ? XLSX.utils.json_to_sheet(rows)
+          : XLSX.utils.aoa_to_sheet([["No matching numbers"]]);
+        worksheet['!cols'] = Object.keys(rows[0] || {}).map((key) => ({
+          wch: Math.min(Math.max(key.length + 2, 14), 32)
+        }));
+        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+      });
+
+      XLSX.writeFile(workbook, `Phone_Type_Separated_${Date.now()}.xlsx`);
+    }
+
+    // Export Results as CSV File
+    function exportToCSV() {
+      if (validatedResults.length === 0) {
+        alert("No results available to export.");
+        return;
+      }
+
+      const exportRows = validatedResults.map(r => ({
+        "Input": r.raw || "",
+        "Phone Number": r.number || "",
+        "E.164": r.e164 || "",
+        "Line Type": r.lineType || "",
+        "Line Subtype": r.lineSubtype || "",
+        "Current Carrier": r.carrier || "",
+        "Normalized Carrier": r.normalizedCarrier || "",
+        "Original / Route Carrier": r.originalCarrier || "",
+        "Ported Status": r.portedStatus || "",
+        "Ported Date": r.portedDate || "",
+        "LRN": r.lrn || "",
+        "OCN": r.ocn || "",
+        "SPID": r.spid || "",
+        "MCC": r.mobileCountryCode || "",
+        "MNC": r.mobileNetworkCode || "",
+        "Location": r.location || "",
+        "Lookup Source": r.lookupSource || "Offline metadata",
+        "Data Freshness": r.dataFreshness || "",
+        "Fallback Used": r.fallbackUsed ? "Yes" : "No",
+        "Lookup Error": r.lookupError || "",
+        "Format Validity": r.valid ? "Valid Format" : "Invalid"
+      }));
+      const headers = Object.keys(exportRows[0]);
+      const csvEscape = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+      const csvContent = [
+        headers.map(csvEscape).join(','),
+        ...exportRows.map(row => headers.map(header => csvEscape(row[header])).join(','))
+      ].join('\r\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", `phone_validations_${Date.now()}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    function setDocLanguage(lang) {
+      currentDocLang = lang;
+      ['gsheet', 'python', 'javascript', 'curl'].forEach(l => {
+        const btn = document.getElementById(`lang-btn-${l}`);
+        if (l === lang) {
+          btn.classList.add('bg-brand-600', 'text-white');
+          btn.classList.remove('bg-slate-800', 'text-slate-300');
+        } else {
+          btn.classList.remove('bg-brand-600', 'text-white');
+          btn.classList.add('bg-slate-800', 'text-slate-300');
+        }
+      });
+
+      const gsheetGuide = document.getElementById('gsheet-instructions');
+      if (lang === 'gsheet') gsheetGuide.classList.remove('hidden');
+      else gsheetGuide.classList.add('hidden');
+
+      updateCodeSnippet();
+    }
+
+    function updateCodeSnippet() {
+      const codeBox = document.getElementById('code-snippet-box');
+
+      if (currentDocLang === 'gsheet') {
+        codeBox.innerText = `/**
+ * Google Apps Script Custom Function.
+ * Replace YOUR_PUBLIC_SERVER_URL with a deployed HTTPS copy of this API.
+ * Google Sheets cannot reach localhost on your computer.
+ * Usage in Sheet: =CHECK_LINE_TYPE(A2)
+ */
+function CHECK_LINE_TYPE(phoneNumber) {
+  if (!phoneNumber) return "Unknown";
+
+  var baseUrl = "YOUR_PUBLIC_SERVER_URL";
+  var url = baseUrl + "/validate?phone=" + encodeURIComponent(phoneNumber)
+            + "&default_region=US&lookup_mode=auto";
+  try {
+    var response = UrlFetchApp.fetch(url);
+    var json = JSON.parse(response.getContentText());
+
+    return json.valid ? json.lineType : "Invalid";
+  } catch(e) {
+    return "API Error";
+  }
+}`;
+      } else if (currentDocLang === 'python') {
+        codeBox.innerText = `# The local API is already running when you use start_portal.bat.
+import requests
+
+response = requests.get(
+    "http://127.0.0.1:8000/validate",
+    params={"phone": "+14804791999", "default_region": "US", "lookup_mode": "auto"},
+    timeout=30,
+)
+response.raise_for_status()
+print(response.json())`;
+      } else if (currentDocLang === 'javascript') {
+        codeBox.innerText = `// Browser / Node.js Fetch Integration
+async function validatePhoneNumber(phone) {
+  const params = new URLSearchParams({ phone, default_region: 'US', lookup_mode: 'auto' });
+  const response = await fetch(\`http://127.0.0.1:8000/validate?\${params}\`);
+  if (!response.ok) throw new Error(\`API error: \${response.status}\`);
+  return response.json();
+}`;
+      } else if (currentDocLang === 'curl') {
+        codeBox.innerText = `# Request Phone Line Type via cURL
+curl "http://127.0.0.1:8000/validate?phone=%2B14804791999&default_region=US&lookup_mode=auto"`;
+      }
+    }
+
+    function copyCodeSnippet() {
+      const codeText = document.getElementById('code-snippet-box').innerText;
+      copyToClipboard(codeText);
+      const btnText = document.getElementById('copy-btn-text');
+      btnText.innerText = "Copied!";
+      setTimeout(() => { btnText.innerText = "Copy Code"; }, 2000);
+    }
+
+    function copyToClipboard(text) {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+
+    // No automatic demo lookup. Validation starts only after the user submits numbers.
+  </script>
+</body>
+</html>
