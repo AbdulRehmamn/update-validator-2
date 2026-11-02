@@ -1,4 +1,4 @@
-NUMVERIFY PRO v6.2 - NATIONWIDE LINE-TYPE & CARRIER INTELLIGENCE
+NUMVERIFY PRO v6.3 - NATIONWIDE LINE-TYPE & CARRIER INTELLIGENCE
 ========================================================
 
 WHAT THIS VERSION DOES
@@ -98,11 +98,39 @@ DATA SOURCES
 LOCAL API
 Interactive documentation: http://127.0.0.1:8000/docs
 
-Single lookup example:
+API keys: list one or more keys in .env as API_KEYS=key1,key2. When set, every
+/validate call must send a key in the X-API-Key header (or
+"Authorization: Bearer <key>"); a missing or wrong key returns HTTP 401. The
+browser portal keeps working automatically. Leave API_KEYS empty for no key.
+
+Single lookup (JSON body) - see client_example.py:
+  POST /validate
+  Header: X-API-Key: <your key>
+  Body:   {"phone_number": "(415) 555-2671", "lookup_mode": "auto"}
+  ("phone" or "number" are accepted instead of "phone_number".)
+
+Single lookup (query string):
   GET /validate?phone=%2B16077341118&lookup_mode=auto
 
-Bulk request fields:
+Bulk request fields (POST /validate/bulk):
   numbers, default_region, lookup_mode (auto/live/offline), refresh_live
+
+numberStatus field in every result:
+  valid               - structurally valid and in an assigned exchange
+  unassigned_exchange - the NPA-NXX is not assigned to any carrier in the
+                        NANPA records, so the number is not in service
+  fictional           - 555-0100 to 555-0199, reserved for films/TV
+  special_service     - e.g. 555-1212 directory assistance
+  invalid_number      - right length but not a valid number for the country
+  invalid_format      - could not be parsed as a phone number
+
+v6.3 ACCURACY IMPROVEMENTS
+- Numbers in exchanges that NANPA has never assigned (for example any
+  555-XXXX number) are now reported as not in service instead of valid.
+- If a live provider is configured, an unassigned-exchange result is re-checked
+  live, because the bundled NANPA file can be older than a new assignment.
+- A live lookup that returns no line type no longer overrides an offline
+  "not in service" finding.
 
 RUN TESTS
 After start_portal has created .venv:

@@ -173,5 +173,155 @@ class ProviderPayloadTests(unittest.TestCase):
         self.assertFalse(merged["estimated"])
 
 
+class AccuracyRuleTests(unittest.TestCase):
+    def test_555_number_is_not_in_service(self):
+        result = app.validate_number_offline("(415) 555-2671")
+        self.assertFalse(result["valid"])
+        self.assertTrue(result["possible"])
+        self.assertEqual(result["numberStatus"], "unassigned_exchange")
+        self.assertEqual(result["e164"], "+14155552671")
+        self.assertEqual(result["location"], "San Francisco, CA")
+
+    def test_fictional_555_01xx_range(self):
+        for phone in ("2025550143", "+13125550199"):
+            with self.subTest(phone=phone):
+                result = app.validate_number_offline(phone)
+                self.assertFalse(result["valid"])
+                self.assertEqual(result["numberStatus"], "fictional")
+
+    def test_directory_assistance_is_special_service(self):
+        result = app.validate_number_offline("212-555-1212")
+        self.assertEqual(result["numberStatus"], "special_service")
+
+    def test_unassigned_exchange_in_known_area_code(self):
+        # 415 is a covered San Francisco area code; find an NXX it lacks.
+        missing = next(
+            nxx
+            for nxx in map(str, range(200, 1000))
+            if nxx != "555"
+            and app.lookup_nanpa_prefix(f"415{nxx}0123") is None
+            and app.phonenumbers.is_valid_number(
+                app.phonenumbers.parse(f"+1415{nxx}0123")
+            )
+        )
+        result = app.validate_number_offline(f"+1415{missing}0123")
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["numberStatus"], "unassigned_exchange")
+        self.assertEqual(result["lookupSource"], "NANPA Central Office Code assignments")
+
+    def test_assigned_exchange_stays_valid(self):
+        result = app.validate_number_offline("+14152220123")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["numberStatus"], "valid")
+        self.assertTrue(result["assignedExchange"])
+
+    def test_toll_free_555_is_not_flagged(self):
+        result = app.validate_number_offline("+18005550199")
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["lineType"], "Toll-Free")
+
+    def test_toll_free_and_canada_skip_unassigned_check(self):
+        for phone in ("+18885550100", "+14165550000", "+16135550000"):
+            with self.subTest(phone=phone):
+                result = app.validate_number_offline(phone)
+                self.assertNotEqual(
+                    result["lookupSource"], "NANPA Central Office Code assignments"
+                )
+
+    def test_unknown_live_type_does_not_revive_unassigned_number(self):
+        offline = app.validate_number_offline("+14155552671")
+        offline["lookupSource"] = "NANPA Central Office Code assignments"
+        merged = app.merge_live_result(
+            offline,
+            {"providerValid": True, "lineType": "Unknown"},
+            "telnyx",
+            cache_hit=False,
+            looked_up_at=1_700_000_000,
+        )
+        self.assertFalse(merged["valid"])
+        self.assertEqual(merged["numberStatus"], "unassigned_exchange")
+
+    def test_known_live_type_overrides_stale_snapshot(self):
+        offline = app.validate_number_offline("+14155552671")
+        merged = app.merge_live_result(
+            offline,
+            {"providerValid": True, "lineType": "Cell Phone", "carrier": "X"},
+            "telnyx",
+            cache_hit=False,
+            looked_up_at=1_700_000_000,
+        )
+        self.assertTrue(merged["valid"])
+        self.assertEqual(merged["numberStatus"], "valid")
+
+
+class ApiKeyEndpointTests(unittest.TestCase):
+    KEY = "val_live_test_key_123"
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        self._saved_keys = app.API_KEYS
+        app.API_KEYS = (self.KEY,)
+        self.client = TestClient(app.app)
+
+    def tearDown(self):
+        app.API_KEYS = self._saved_keys
+
+    def test_post_validate_with_key(self):
+        response = self.client.post(
+            "/validate",
+            json={"phone_number": "(415) 555-2671", "lookup_mode": "offline"},
+            headers={"X-API-Key": self.KEY},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["e164"], "+14155552671")
+        self.assertEqual(body["numberStatus"], "unassigned_exchange")
+
+    def test_bearer_and_alias_fields(self):
+        response = self.client.post(
+            "/validate",
+            json={"phone": "+14152220123", "lookup_mode": "offline"},
+            headers={"Authorization": f"Bearer {self.KEY}"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["valid"])
+
+    def test_missing_or_wrong_key_rejected(self):
+        payload = {"phone_number": "+14152220123"}
+        self.assertEqual(self.client.post("/validate", json=payload).status_code, 401)
+        self.assertEqual(
+            self.client.post(
+                "/validate", json=payload, headers={"X-API-Key": "wrong"}
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/validate", params={"phone": "+14152220123"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.post("/validate/bulk", json={"numbers": ["1"]}).status_code,
+            401,
+        )
+
+    def test_portal_token_allows_browser_ui(self):
+        page = self.client.get("/").text
+        self.assertIn(app.PORTAL_TOKEN, page)
+        response = self.client.get(
+            "/validate",
+            params={"phone": "+14152220123", "lookup_mode": "offline"},
+            headers={"X-Portal-Token": app.PORTAL_TOKEN},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_open_when_no_keys_configured(self):
+        app.API_KEYS = ()
+        response = self.client.post(
+            "/validate", json={"phone_number": "+14152220123", "lookup_mode": "offline"}
+        )
+        self.assertEqual(response.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

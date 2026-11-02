@@ -9,15 +9,18 @@ completed, the response falls back to clearly labelled offline metadata.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
 import webbrowser
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
@@ -26,10 +29,10 @@ import httpx
 import phonenumbers
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from phonenumbers import PhoneNumberType, carrier, geocoder
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -72,6 +75,22 @@ LOOKUP_TIMEOUT_SECONDS = _bounded_env_number(
     "LOOKUP_TIMEOUT_SECONDS", 20, 5, 60
 )
 
+def _parse_api_keys(raw: str) -> tuple[str, ...]:
+    return tuple(key.strip() for key in re.split(r"[,\s]+", raw or "") if key.strip())
+
+
+# Keys that external scripts must send in the X-API-Key header (or as
+# "Authorization: Bearer <key>"). When empty, the API stays open as before.
+API_KEYS = _parse_api_keys(os.getenv("API_KEYS", ""))
+
+# The browser portal served at "/" receives this per-process token instead of a
+# real API key, so the portal keeps working when API_KEYS is enabled.
+PORTAL_TOKEN = secrets.token_urlsafe(32)
+
+# U.S. regions covered by the bundled NANPA Central Office Code records.
+# Canada and the Caribbean NANP countries are administered separately.
+NANPA_DATABASE_REGIONS = {"US", "PR", "VI", "GU", "AS", "MP"}
+
 PROVIDER_LABELS = {
     "telnyx": "Telnyx Number Lookup",
     "twilio": "Twilio Line Type Intelligence",
@@ -90,7 +109,7 @@ app = FastAPI(
         "Local structural validation with optional live carrier, line-type, "
         "and portability intelligence from Telnyx or Twilio."
     ),
-    version="6.2.0",
+    version="6.3.0",
     lifespan=lifespan,
 )
 
@@ -100,6 +119,43 @@ class BulkValidationRequest(BaseModel):
     default_region: str = Field(default=DEFAULT_REGION, min_length=2, max_length=2)
     lookup_mode: Literal["auto", "live", "offline"] = "auto"
     refresh_live: bool = False
+
+
+class SingleValidationRequest(BaseModel):
+    phone_number: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("phone_number", "phone", "number"),
+        description="Phone number in any common format, e.g. (415) 555-2671 or +14155552671",
+    )
+    default_region: str = Field(default=DEFAULT_REGION, min_length=2, max_length=2)
+    lookup_mode: Literal["auto", "live", "offline"] = "auto"
+    refresh_live: bool = False
+
+
+def require_api_key(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None),
+    x_portal_token: str | None = Header(default=None, alias="X-Portal-Token"),
+) -> None:
+    """Enforce API keys on validation endpoints when API_KEYS is configured."""
+    if not API_KEYS:
+        return
+    if x_portal_token and hmac.compare_digest(x_portal_token, PORTAL_TOKEN):
+        return
+    supplied = (x_api_key or "").strip()
+    if not supplied and authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer":
+            supplied = value.strip()
+    if not supplied:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Send it in the X-API-Key header.",
+        )
+    if not any(hmac.compare_digest(supplied, key) for key in API_KEYS):
+        raise HTTPException(status_code=401, detail="Invalid API key.")
 
 
 class LiveLookupError(RuntimeError):
@@ -194,7 +250,7 @@ def lookup_nanpa_prefix(national_digits: str) -> dict[str, Any] | None:
         return None
     prefix = f"{national_digits[:3]}-{national_digits[3:6]}"
     try:
-        with sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)) as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 """
@@ -207,6 +263,55 @@ def lookup_nanpa_prefix(national_digits: str) -> dict[str, Any] | None:
     except sqlite3.Error:
         return None
     return dict(row) if row else None
+
+
+@lru_cache(maxsize=1024)
+def nanpa_area_code_known(npa: str) -> bool:
+    """True when the bundled database holds at least one prefix for this NPA.
+
+    The unassigned-exchange check is only applied to area codes the database
+    actually covers, so a brand-new area code missing from an older snapshot
+    is never wrongly reported as unassigned.
+    """
+    if not DATABASE_PATH.exists() or len(npa) != 3:
+        return False
+    try:
+        with closing(sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM prefixes WHERE prefix >= ? AND prefix < ? LIMIT 1",
+                (f"{npa}-", f"{npa}."),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def nanp_reserved_status(national_digits: str) -> tuple[str, str] | None:
+    """Detect NANP numbers that are reserved and can never reach a subscriber.
+
+    Returns (number_status, explanation) or None.
+    """
+    if len(national_digits) != 10:
+        return None
+    nxx, line = national_digits[3:6], national_digits[6:]
+    if nxx != "555":
+        return None
+    if "0100" <= line <= "0199":
+        return (
+            "fictional",
+            "555-0100 through 555-0199 are reserved by NANPA for fictional use "
+            "(films, TV, documentation). This number cannot be assigned to anyone.",
+        )
+    if line == "1212":
+        return (
+            "special_service",
+            "555-1212 is the directory-assistance service code, not a subscriber line.",
+        )
+    return (
+        "unassigned_exchange",
+        "The 555 exchange is not assigned to telephone carriers for ordinary "
+        "subscriber lines, so this number is not in service.",
+    )
 
 
 def invalid_result(raw: str, message: str) -> dict[str, Any]:
@@ -250,6 +355,8 @@ def invalid_result(raw: str, message: str) -> dict[str, Any]:
         "fallbackUsed": False,
         "classificationNote": message,
         "lookupError": "",
+        "numberStatus": "invalid_format",
+        "assignedExchange": None,
         "error": message,
     }
 
@@ -326,6 +433,56 @@ def validate_number_offline(
             f"{prefix_record['company']}.{pooled_note} Ported numbers may differ."
         )
 
+    number_status = "valid" if valid else ("invalid_number" if possible else "invalid_format")
+    assigned_exchange: bool | None = True if prefix_record else None
+
+    geographic = line_type in {"Fixed or Mobile", "Landline", "Cell Phone", "VoIP"}
+    if valid and parsed.country_code == 1 and geographic:
+        # Toll-free and other non-geographic NANP codes are administered
+        # separately and may legitimately use 555, so they are excluded.
+        reserved = nanp_reserved_status(national_digits)
+        if reserved:
+            number_status, note = reserved
+            assigned_exchange = False
+            prefix_record = None
+            confidence = "High"
+            estimated = False
+            source = "NANPA numbering rules"
+            if number_status == "special_service":
+                line_type, line_subtype = "Unknown", "Directory Assistance"
+                offline_carrier = "Directory assistance service code"
+            else:
+                valid = False
+                line_type = "Unknown"
+                line_subtype = (
+                    "Fictional (reserved)"
+                    if number_status == "fictional"
+                    else "Unassigned exchange"
+                )
+                offline_carrier = "Not assigned to any carrier"
+        elif (
+            not prefix_record
+            and country in NANPA_DATABASE_REGIONS
+            and nanpa_area_code_known(national_digits[:3])
+        ):
+            # The NPA is covered by the NANPA records, but this NXX has never
+            # been assigned to a carrier, so no subscriber can hold the number.
+            npa_nxx = f"{national_digits[:3]}-{national_digits[3:6]}"
+            db_date = database_metadata().get("file_updated", "the bundled file")
+            valid = False
+            number_status = "unassigned_exchange"
+            assigned_exchange = False
+            line_type, line_subtype = "Unknown", "Unassigned exchange"
+            offline_carrier = "Not assigned to any carrier"
+            confidence = "High"
+            estimated = False
+            source = "NANPA Central Office Code assignments"
+            note = (
+                f"Exchange {npa_nxx} is not assigned to any carrier in the NANPA "
+                f"Central Office Code records ({db_date}), so this number is not in "
+                "service. Run the offline database update if the file is old."
+            )
+
     return {
         "raw": raw,
         "number": national_digits,
@@ -366,6 +523,8 @@ def validate_number_offline(
         "fallbackUsed": False,
         "classificationNote": note,
         "lookupError": "",
+        "numberStatus": number_status,
+        "assignedExchange": assigned_exchange,
         "error": None,
     }
 
@@ -647,8 +806,17 @@ def merge_live_result(
     if live.get("location"):
         result["location"] = live["location"]
 
+    offline_unassigned = offline.get("numberStatus") == "unassigned_exchange"
     if isinstance(live.get("providerValid"), bool):
-        result["valid"] = live["providerValid"]
+        if live_type_known or not offline_unassigned:
+            result["valid"] = live["providerValid"]
+    if live.get("providerValid") is False:
+        result["numberStatus"] = "invalid_number"
+    elif live_type_known:
+        # A live provider record supersedes an older offline snapshot.
+        result["numberStatus"] = "valid" if result["valid"] else "invalid_number"
+        if offline_unassigned:
+            result["assignedExchange"] = None
 
     if live_type_known:
         result["lineType"] = live_line_type
@@ -698,7 +866,11 @@ async def validate_number(
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     offline = validate_number_offline(phone, default_region)
-    if not offline["valid"] or lookup_mode == "offline":
+    # Exchanges missing from the NANPA snapshot are re-checked live (when a
+    # provider is configured) because the snapshot can be older than a new
+    # assignment. Format errors and reserved 555 numbers never cost a lookup.
+    recheck_live = offline.get("lookupSource") == "NANPA Central Office Code assignments"
+    if lookup_mode == "offline" or (not offline["valid"] and not recheck_live):
         return offline
 
     providers = provider_chain(lookup_mode)
@@ -778,15 +950,19 @@ def database_metadata() -> dict[str, str]:
     if not DATABASE_PATH.exists():
         return {}
     try:
-        with sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)) as connection:
             return dict(connection.execute("SELECT key, value FROM metadata").fetchall())
     except sqlite3.Error:
         return {}
 
 
 @app.get("/", include_in_schema=False)
-def portal() -> FileResponse:
-    return FileResponse(BASE_DIR / "index.html")
+def portal() -> HTMLResponse:
+    html = (BASE_DIR / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        html.replace("__PORTAL_TOKEN__", PORTAL_TOKEN),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/health")
@@ -819,6 +995,7 @@ def engine_status() -> dict[str, Any]:
         "rules_version": metadata.get("rules_version", "Legacy carrier rules"),
         "cache_hours": LOOKUP_CACHE_HOURS,
         "concurrency": LOOKUP_CONCURRENCY,
+        "api_key_required": bool(API_KEYS),
         "accuracy_notice": (
             "No database can guarantee 100% accuracy or prove reachability. "
             "Live results are the provider's latest available carrier records."
@@ -826,7 +1003,7 @@ def engine_status() -> dict[str, Any]:
     }
 
 
-@app.get("/validate")
+@app.get("/validate", dependencies=[Depends(require_api_key)])
 async def validate_phone(
     phone: str = Query(..., description="Phone number, preferably in E.164 format"),
     default_region: str = Query(DEFAULT_REGION, min_length=2, max_length=2),
@@ -841,7 +1018,18 @@ async def validate_phone(
     )
 
 
-@app.post("/validate/bulk")
+@app.post("/validate", dependencies=[Depends(require_api_key)])
+async def validate_phone_json(payload: SingleValidationRequest) -> dict[str, Any]:
+    """JSON body form: {"phone_number": "(415) 555-2671"} with an X-API-Key header."""
+    return await validate_number(
+        payload.phone_number,
+        payload.default_region,
+        lookup_mode=payload.lookup_mode,
+        refresh_live=payload.refresh_live,
+    )
+
+
+@app.post("/validate/bulk", dependencies=[Depends(require_api_key)])
 async def validate_bulk(payload: BulkValidationRequest) -> dict[str, Any]:
     unique_numbers = list(dict.fromkeys(str(number) for number in payload.numbers))
     semaphore = asyncio.Semaphore(LOOKUP_CONCURRENCY)
