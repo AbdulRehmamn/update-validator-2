@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="portal-token" content="__PORTAL_TOKEN__">
   <title>NumVerify Pro v6.2 — Nationwide Phone Intelligence</title>
   
   <!-- Tailwind CSS CDN -->
@@ -834,6 +835,15 @@
       document.getElementById('bulk-input').value = sampleText;
     }
 
+    // The server injects a per-session portal token so the portal keeps working
+    // when API keys are required for external scripts.
+    function portalHeaders(extra = {}) {
+      const meta = document.querySelector('meta[name="portal-token"]');
+      const token = meta ? meta.content : '';
+      // An unreplaced placeholder (page opened as a file) starts with '__'.
+      return token && !token.startsWith('__') ? { ...extra, 'X-Portal-Token': token } : extra;
+    }
+
     // Core Phone Validation Logic
     async function lookupPhoneNumber(rawNumber, refreshLive = false) {
       const params = new URLSearchParams({
@@ -842,7 +852,7 @@
         lookup_mode: appSettings.lookupMode,
         refresh_live: refreshLive ? 'true' : 'false'
       });
-      const response = await fetch(`/validate?${params.toString()}`);
+      const response = await fetch(`/validate?${params.toString()}`, { headers: portalHeaders() });
       if (!response.ok) {
         throw new Error(`Validation API returned ${response.status}`);
       }
@@ -891,7 +901,7 @@
 
           const response = await fetch('/validate/bulk', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: portalHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
               numbers: chunk,
               default_region: appSettings.defaultRegion,
@@ -1151,7 +1161,7 @@
 
         const validElement = document.getElementById('single-valid');
         validElement.className = `${res.valid ? 'text-emerald-400' : 'text-rose-400'} font-semibold flex items-center space-x-1`;
-        validElement.innerHTML = `<i data-lucide="${res.valid ? 'check-circle-2' : 'x-circle'}" class="w-3.5 h-3.5"></i><span>${res.valid ? 'Valid Format' : (res.possible ? 'Possible, Not Valid' : 'Invalid Format')}</span>`;
+        validElement.innerHTML = `<i data-lucide="${res.valid ? 'check-circle-2' : 'x-circle'}" class="w-3.5 h-3.5"></i><span>${res.valid ? 'Valid Format' : (res.numberStatus === 'unassigned_exchange' ? 'Not In Service (Unassigned)' : res.numberStatus === 'fictional' ? 'Fictional (Reserved)' : (res.possible ? 'Possible, Not Valid' : 'Invalid Format'))}</span>`;
 
         const [badgeStyle, badgeIcon] = lineTypeBadge(res.lineType);
         document.getElementById('single-type-badge').innerHTML = `
@@ -1161,7 +1171,9 @@
           </span>`;
 
         document.getElementById('single-explanation').innerText = !res.valid
-          ? 'This number is not structurally valid for the selected country. Include the full international country code when possible.'
+          ? (res.numberStatus === 'unassigned_exchange' || res.numberStatus === 'fictional'
+              ? res.classificationNote
+              : 'This number is not structurally valid for the selected country. Include the full international country code when possible.')
           : `${res.classificationNote || ''} Source: ${res.lookupSource}. ${res.dataFreshness || ''}`.trim();
 
         const warning = document.getElementById('single-lookup-warning');
@@ -1334,7 +1346,7 @@ function CHECK_LINE_TYPE(phoneNumber) {
   var url = baseUrl + "/validate?phone=" + encodeURIComponent(phoneNumber)
             + "&default_region=US&lookup_mode=auto";
   try {
-    var response = UrlFetchApp.fetch(url);
+    var response = UrlFetchApp.fetch(url, { headers: { "X-API-Key": "YOUR_API_KEY" } });
     var json = JSON.parse(response.getContentText());
 
     return json.valid ? json.lineType : "Invalid";
@@ -1346,24 +1358,33 @@ function CHECK_LINE_TYPE(phoneNumber) {
         codeBox.innerText = `# The local API is already running when you use start_portal.bat.
 import requests
 
-response = requests.get(
-    "http://127.0.0.1:8000/validate",
-    params={"phone": "+14804791999", "default_region": "US", "lookup_mode": "auto"},
-    timeout=30,
-)
+url = "http://127.0.0.1:8000/validate"
+headers = {
+    "Content-Type": "application/json",
+    "X-API-Key": "YOUR_API_KEY",  # one of the API_KEYS values in .env
+}
+payload = {"phone_number": "(415) 555-2671", "lookup_mode": "auto"}
+
+response = requests.post(url, json=payload, headers=headers, timeout=30)
 response.raise_for_status()
 print(response.json())`;
       } else if (currentDocLang === 'javascript') {
         codeBox.innerText = `// Browser / Node.js Fetch Integration
 async function validatePhoneNumber(phone) {
-  const params = new URLSearchParams({ phone, default_region: 'US', lookup_mode: 'auto' });
-  const response = await fetch(\`http://127.0.0.1:8000/validate?\${params}\`);
+  const response = await fetch('http://127.0.0.1:8000/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': 'YOUR_API_KEY' },
+    body: JSON.stringify({ phone_number: phone, lookup_mode: 'auto' })
+  });
   if (!response.ok) throw new Error(\`API error: \${response.status}\`);
   return response.json();
 }`;
       } else if (currentDocLang === 'curl') {
         codeBox.innerText = `# Request Phone Line Type via cURL
-curl "http://127.0.0.1:8000/validate?phone=%2B14804791999&default_region=US&lookup_mode=auto"`;
+curl -X POST "http://127.0.0.1:8000/validate" \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: YOUR_API_KEY" \\
+  -d '{"phone_number": "(415) 555-2671", "lookup_mode": "auto"}'`;
       }
     }
 

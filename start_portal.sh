@@ -21,7 +21,7 @@ if [ ! -f "nanpa_prefixes.sqlite3" ]; then
 fi
 
 if [ -f ".env" ]; then
-  echo "Live lookup settings detected. The configured provider will be used."
+  echo "Settings file .env detected. Live lookups run only if provider credentials are filled in."
 else
   echo "Offline fallback mode. Run ./configure_live_lookup.sh for current carrier data."
 fi

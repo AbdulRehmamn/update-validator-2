@@ -43,7 +43,7 @@ if not exist "nanpa_prefixes.sqlite3" (
 
 echo.
 if exist ".env" (
-  echo Live lookup settings detected. The portal will use the configured provider.
+  echo Settings file .env detected. Live lookups run only if provider credentials are filled in.
 ) else (
   echo Offline fallback mode. Run configure_live_lookup.bat for current carrier data.
 )
