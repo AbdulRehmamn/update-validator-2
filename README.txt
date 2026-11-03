@@ -1,4 +1,4 @@
-NUMVERIFY PRO v6.3 - NATIONWIDE LINE-TYPE & CARRIER INTELLIGENCE
+NUMVERIFY PRO v6.4 - NATIONWIDE LINE-TYPE & CARRIER INTELLIGENCE
 ========================================================
 
 WHAT THIS VERSION DOES
@@ -114,6 +114,31 @@ Single lookup (query string):
 
 Bulk request fields (POST /validate/bulk):
   numbers, default_region, lookup_mode (auto/live/offline), refresh_live
+  Up to 10,000 numbers per request.
+
+PHONE-VALIDATOR-API COMPATIBILITY (v6.4)
+Scripts written for the standalone phone-validator-api work against this
+server unchanged (add the X-API-Key header if API_KEYS is set):
+  GET  /validate?number=+18002752273
+  GET  /validate?number=03001234567&region=PK
+  POST /validate/batch  {"numbers": ["+923001234567", "042 35761234"], "region": "PK"}
+       -> returns a plain list of results, up to 10,000 numbers
+  GET  /api             -> service info (the portal stays at /)
+Every result also carries that API's fields:
+  input, line_type (cell_phone, landline, landline_or_cell_phone, voip,
+  toll_free, premium_rate, shared_cost, personal_number, pager, uan,
+  voicemail, satellite, unknown), international_format, region,
+  calling_code, original_carrier, timezones, error.
+One difference: country_code stays a string like "+1" for the portal; the
+numeric form is in calling_code. Results also gain everything this server
+adds on top: live carrier/porting data, the NANPA prefix database, and
+numberStatus (unassigned / fictional detection).
+
+DOCKER
+  docker build -t numverify-pro .
+  docker run -p 8000:8000 --env-file .env numverify-pro
+Inside Docker the API listens on all network interfaces, so set API_KEYS in
+.env before exposing it to other machines.
 
 numberStatus field in every result:
   valid               - structurally valid and in an assigned exchange

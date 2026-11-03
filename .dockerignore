@@ -1,0 +1,7 @@
+.env
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+lookup_cache.sqlite3*
+tests/

@@ -323,5 +323,96 @@ class ApiKeyEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class PhoneValidatorApiCompatTests(unittest.TestCase):
+    """Requests written for the standalone phone-validator-api."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        self._saved_keys = app.API_KEYS
+        app.API_KEYS = ()
+        self.client = TestClient(app.app)
+
+    def tearDown(self):
+        app.API_KEYS = self._saved_keys
+
+    def test_get_with_number_and_region(self):
+        body = self.client.get(
+            "/validate", params={"number": "03001234567", "region": "PK"}
+        ).json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["line_type"], "cell_phone")
+        self.assertEqual(body["region"], "PK")
+        self.assertEqual(body["calling_code"], 92)
+        self.assertEqual(body["international_format"], "+92 300 1234567")
+        self.assertIn("Asia/Karachi", body["timezones"])
+        self.assertEqual(body["input"], "03001234567")
+
+    def test_toll_free_line_type(self):
+        body = self.client.get("/validate", params={"number": "+18002752273"}).json()
+        self.assertEqual(body["line_type"], "toll_free")
+        self.assertEqual(body["international_format"], "+1 800-275-2273")
+
+    def test_us_landline_uses_prefix_database(self):
+        body = self.client.get(
+            "/validate", params={"number": "+12127365000", "lookup_mode": "offline"}
+        ).json()
+        self.assertEqual(body["line_type"], "landline")
+        self.assertEqual(body["original_carrier"], "VERIZON NEW YORK, INC.")
+
+    def test_invalid_numbers_carry_error(self):
+        body = self.client.get("/validate", params={"number": "+14155552671"}).json()
+        self.assertFalse(body["valid"])
+        self.assertIsNone(body["line_type"])
+        self.assertIn("555", body["error"])
+        body = self.client.get("/validate", params={"number": "12"}).json()
+        self.assertFalse(body["valid"])
+        self.assertTrue(body["error"])
+
+    def test_missing_number_is_422(self):
+        self.assertEqual(self.client.get("/validate").status_code, 422)
+
+    def test_batch_returns_list(self):
+        response = self.client.post(
+            "/validate/batch",
+            json={
+                "numbers": ["+923001234567", "+18002752273", "042 35761234"],
+                "region": "PK",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsInstance(body, list)
+        self.assertEqual(
+            [item["line_type"] for item in body], ["cell_phone", "toll_free", "landline"]
+        )
+
+    def test_batch_limit(self):
+        response = self.client.post(
+            "/validate/batch", json={"numbers": ["+18002752273"] * 10_001}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_original_query_names_still_work(self):
+        body = self.client.get(
+            "/validate", params={"phone": "2127365000", "default_region": "US"}
+        ).json()
+        self.assertTrue(body["valid"])
+        bulk = self.client.post("/validate/bulk", json={"numbers": ["2127365000"]}).json()
+        self.assertEqual(bulk["count"], 1)
+        self.assertEqual(bulk["results"][0]["line_type"], "landline")
+
+    def test_batch_requires_key_when_configured(self):
+        app.API_KEYS = ("k",)
+        payload = {"numbers": ["+18002752273"]}
+        self.assertEqual(self.client.post("/validate/batch", json=payload).status_code, 401)
+        self.assertEqual(
+            self.client.post(
+                "/validate/batch", json=payload, headers={"X-API-Key": "k"}
+            ).status_code,
+            200,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

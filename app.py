@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from phonenumbers import PhoneNumberType, carrier, geocoder
+from phonenumbers import timezone as phone_timezone
 from pydantic import AliasChoices, BaseModel, Field
 
 
@@ -85,7 +86,13 @@ API_KEYS = _parse_api_keys(os.getenv("API_KEYS", ""))
 
 # The browser portal served at "/" receives this per-process token instead of a
 # real API key, so the portal keeps working when API_KEYS is enabled.
-PORTAL_TOKEN = secrets.token_urlsafe(32)
+# Set PORTAL_TOKEN in the environment when running several worker processes
+# so every worker accepts the same portal token.
+PORTAL_TOKEN = os.getenv("PORTAL_TOKEN", "").strip() or secrets.token_urlsafe(32)
+
+# Requests may contain at most this many numbers (same limit as the
+# standalone phone-validator-api).
+MAX_BATCH_NUMBERS = 10_000
 
 # U.S. regions covered by the bundled NANPA Central Office Code records.
 # Canada and the Caribbean NANP countries are administered separately.
@@ -109,14 +116,19 @@ app = FastAPI(
         "Local structural validation with optional live carrier, line-type, "
         "and portability intelligence from Telnyx or Twilio."
     ),
-    version="6.3.0",
+    version="6.4.0",
     lifespan=lifespan,
 )
 
 
 class BulkValidationRequest(BaseModel):
     numbers: list[str] = Field(default_factory=list)
-    default_region: str = Field(default=DEFAULT_REGION, min_length=2, max_length=2)
+    default_region: str = Field(
+        default=DEFAULT_REGION,
+        min_length=2,
+        max_length=2,
+        validation_alias=AliasChoices("default_region", "region"),
+    )
     lookup_mode: Literal["auto", "live", "offline"] = "auto"
     refresh_live: bool = False
 
@@ -129,7 +141,12 @@ class SingleValidationRequest(BaseModel):
         validation_alias=AliasChoices("phone_number", "phone", "number"),
         description="Phone number in any common format, e.g. (415) 555-2671 or +14155552671",
     )
-    default_region: str = Field(default=DEFAULT_REGION, min_length=2, max_length=2)
+    default_region: str = Field(
+        default=DEFAULT_REGION,
+        min_length=2,
+        max_length=2,
+        validation_alias=AliasChoices("default_region", "region"),
+    )
     lookup_mode: Literal["auto", "live", "offline"] = "auto"
     refresh_live: bool = False
 
@@ -858,7 +875,88 @@ def merge_live_result(
     return result
 
 
+# snake_case line types used by the standalone phone-validator-api.
+COMPAT_LINE_TYPES = {
+    "Cell Phone": "cell_phone",
+    "Landline": "landline",
+    "Fixed or Mobile": "landline_or_cell_phone",
+    "VoIP": "voip",
+    "Toll-Free": "toll_free",
+    "Premium Rate": "premium_rate",
+    "Shared Cost": "shared_cost",
+    "Personal Number": "personal_number",
+    "Pager": "pager",
+    "Universal Access": "uan",
+    "Voicemail": "voicemail",
+    "Satellite": "satellite",
+    "Unknown": "unknown",
+}
+
+
+def add_compat_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Add the phone-validator-api response fields to a result.
+
+    Existing fields are left untouched, so the portal and older scripts keep
+    working, while scripts written for phone-validator-api (input, line_type,
+    international_format, region, original_carrier, timezones) work unchanged.
+    """
+    parsed: phonenumbers.PhoneNumber | None = None
+    if result.get("e164"):
+        try:
+            parsed = phonenumbers.parse(result["e164"], None)
+        except phonenumbers.NumberParseException:
+            parsed = None
+
+    valid = bool(result.get("valid"))
+    result["input"] = result.get("raw", "")
+    result["line_type"] = (
+        COMPAT_LINE_TYPES.get(result.get("lineType", "Unknown"), "unknown")
+        if valid
+        else None
+    )
+    result["region"] = result.get("country") or None
+    result["calling_code"] = parsed.country_code if parsed else None
+    result["international_format"] = (
+        phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        if parsed
+        else None
+    )
+    result["timezones"] = (
+        [zone for zone in phone_timezone.time_zones_for_number(parsed) if zone != "Etc/Unknown"]
+        if parsed
+        else []
+    )
+    library_carrier = carrier.name_for_number(parsed, "en") if parsed and valid else ""
+    result["original_carrier"] = (
+        (result.get("originalCarrier") or library_carrier or None) if valid else None
+    )
+    if not valid and not result.get("error"):
+        result["error"] = (
+            result.get("classificationNote")
+            if result.get("numberStatus") in {"unassigned_exchange", "fictional"}
+            else "Number is not valid for its country's numbering plan"
+        )
+    return result
+
+
 async def validate_number(
+    phone: str,
+    default_region: str = DEFAULT_REGION,
+    lookup_mode: Literal["auto", "live", "offline"] = "auto",
+    refresh_live: bool = False,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    result = await _validate_number_core(
+        phone,
+        default_region,
+        lookup_mode=lookup_mode,
+        refresh_live=refresh_live,
+        client=client,
+    )
+    return add_compat_fields(result)
+
+
+async def _validate_number_core(
     phone: str,
     default_region: str = DEFAULT_REGION,
     lookup_mode: Literal["auto", "live", "offline"] = "auto",
@@ -1003,16 +1101,38 @@ def engine_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api", tags=["info"])
+def api_info() -> dict[str, Any]:
+    return {
+        "service": "NumVerify Pro phone validation API",
+        "docs": "/docs",
+        "api_key_required": bool(API_KEYS),
+        "endpoints": [
+            "GET  /validate?number=...&region=..   (or ?phone=...&default_region=..)",
+            "POST /validate          {\"phone_number\": \"...\"}",
+            "POST /validate/batch    {\"numbers\": [...], \"region\": \"US\"}  -> list",
+            "POST /validate/bulk     {\"numbers\": [...]}  -> {count, results}",
+        ],
+    }
+
+
 @app.get("/validate", dependencies=[Depends(require_api_key)])
 async def validate_phone(
-    phone: str = Query(..., description="Phone number, preferably in E.164 format"),
-    default_region: str = Query(DEFAULT_REGION, min_length=2, max_length=2),
+    phone: str | None = Query(None, description="Phone number, preferably in E.164 format"),
+    number: str | None = Query(None, description="Alias of phone (phone-validator-api style)"),
+    default_region: str | None = Query(None, min_length=2, max_length=2),
+    region: str | None = Query(
+        None, min_length=2, max_length=2, description="Alias of default_region"
+    ),
     lookup_mode: Literal["auto", "live", "offline"] = Query("auto"),
     refresh_live: bool = Query(False),
 ) -> dict[str, Any]:
+    value = phone if phone is not None else number
+    if value is None:
+        raise HTTPException(status_code=422, detail="Provide ?phone=... or ?number=...")
     return await validate_number(
-        phone,
-        default_region,
+        value,
+        default_region or region or DEFAULT_REGION,
         lookup_mode=lookup_mode,
         refresh_live=refresh_live,
     )
@@ -1029,8 +1149,12 @@ async def validate_phone_json(payload: SingleValidationRequest) -> dict[str, Any
     )
 
 
-@app.post("/validate/bulk", dependencies=[Depends(require_api_key)])
-async def validate_bulk(payload: BulkValidationRequest) -> dict[str, Any]:
+async def run_batch(payload: BulkValidationRequest) -> list[dict[str, Any]]:
+    if len(payload.numbers) > MAX_BATCH_NUMBERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Max {MAX_BATCH_NUMBERS:,} numbers per request",
+        )
     unique_numbers = list(dict.fromkeys(str(number) for number in payload.numbers))
     semaphore = asyncio.Semaphore(LOOKUP_CONCURRENCY)
     should_open_client = bool(provider_chain(payload.lookup_mode))
@@ -1056,14 +1180,25 @@ async def validate_bulk(payload: BulkValidationRequest) -> dict[str, Any]:
         )
 
     unique_results = dict(zip(unique_numbers, unique_values))
-    results = [unique_results[str(number)].copy() for number in payload.numbers]
+    return [unique_results[str(number)].copy() for number in payload.numbers]
+
+
+@app.post("/validate/bulk", dependencies=[Depends(require_api_key)])
+async def validate_bulk(payload: BulkValidationRequest) -> dict[str, Any]:
+    results = await run_batch(payload)
     return {
         "count": len(results),
-        "unique_count": len(unique_numbers),
+        "unique_count": len({str(number) for number in payload.numbers}),
         "live_enabled": bool(provider_chain(payload.lookup_mode)),
         "database_ready": DATABASE_PATH.exists(),
         "results": results,
     }
+
+
+@app.post("/validate/batch", dependencies=[Depends(require_api_key)])
+async def validate_batch(payload: BulkValidationRequest) -> list[dict[str, Any]]:
+    """phone-validator-api style batch: returns a plain list of results."""
+    return await run_batch(payload)
 
 
 def open_portal() -> None:
@@ -1073,4 +1208,9 @@ def open_portal() -> None:
 if __name__ == "__main__":
     if os.environ.get("NO_BROWSER") != "1":
         threading.Timer(1.25, open_portal).start()
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    uvicorn.run(
+        app,
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        log_level="info",
+    )
